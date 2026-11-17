@@ -1,25 +1,25 @@
 // Boot and the one loop: input is read every frame, the world advances in fixed
 // 1/60 s steps (twice as many at 2x speed), and the renderer paints what is
-// there. The game moves between six screens: title, how to play, play, paused,
-// victory and defeat.
+// there. The game moves between seven screens: title, how to play, play,
+// paused, draft, victory and defeat.
 //
-// ?seed=N fixes the random pattern. ?shot=start|play|victory|defeat (with
-// &seed=N) stages that scene instead of running the loop, paints it twice and
-// sets window.__shotReady for a screenshot.
-import { BEST_KEY, BOARD, STEP } from './config.js';
+// ?seed=N fixes the random pattern. ?shot=start|play|draft|victory|defeat
+// (with &seed=N) stages that scene instead of running the loop, paints it
+// twice and sets window.__shotReady for a screenshot.
+import { BOARD, STEP } from './config.js';
 import { createRandom } from './random.js';
 import {
-  EVENT_GROW, EVENT_HARVEST, EVENT_KILL, EVENT_LEAK, EVENT_NOURISH, EVENT_OVER,
-  EVENT_PLANT, EVENT_SELL, EVENT_SHOOT, EVENT_WAVE_CLEAR, EVENT_WAVE_START, EVENT_WIN,
-  createWorld,
+  EVENT_BLESSING, EVENT_DRAFT, EVENT_GROW, EVENT_HARVEST, EVENT_KILL, EVENT_LEAK,
+  EVENT_NOURISH, EVENT_OVER, EVENT_PLANT, EVENT_SELL, EVENT_SHOOT, EVENT_WAVE_CLEAR,
+  EVENT_WAVE_START, EVENT_WIN, createWorld,
 } from './world.js';
 import { KEY_CONFIRM, KEY_ESCAPE, KEY_MUTE, KEY_PAUSE, KEY_SPEED, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import {
-  LAYOUT, SCREEN_DEFEAT, SCREEN_HOWTO, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE,
-  SCREEN_VICTORY, createRenderer, inside,
+  LAYOUT, SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_HOWTO, SCREEN_PAUSED, SCREEN_PLAY,
+  SCREEN_TITLE, SCREEN_VICTORY, createRenderer, inside,
 } from './render.js';
-import { seasonForWave } from './seasons.js';
+import { readRecords, recordGame } from './records.js';
 import { stageShot } from './shots.js';
 
 /** The longest frame the loop catches up on; a longer stall is dropped, not replayed. */
@@ -37,22 +37,6 @@ const status = document.getElementById('status');
 const world = createWorld(createRandom(seed));
 const renderer = createRenderer(canvas);
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
-
 function runShot(name) {
   const scene = stageShot(name, world);
   // What the staging actually produced, for the screenshot harness to check.
@@ -64,6 +48,8 @@ function runShot(name) {
     hearts: world.state.hearts,
     plants: world.state.plants.length,
     pests: world.state.pests.length,
+    blessings: world.state.blessings.length,
+    longestCombo: world.state.combo.longest,
     won: world.state.won,
     over: world.state.over,
   };
@@ -77,11 +63,14 @@ function runShot(name) {
     preview: world.preview(),
     pestsLeft: world.pestsLeft(),
     pestsTotal: world.pestsTotal(),
+    season: world.season(),
+    seasonFor: (wave) => world.seasonFor(wave),
+    draftOffer: world.draftOffer(),
     canPlant: () => false,
   };
   let painted = 0;
   function paint() {
-    renderer.draw(world.state, ui, scene.screen, scene.best);
+    renderer.draw(world.state, ui, scene.screen, scene.records);
     painted += 1;
     if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
@@ -93,7 +82,7 @@ function runGame() {
   const input = createInput(canvas, (x, y) => renderer.toLogical(x, y));
   const audio = createAudio();
   let screen = SCREEN_TITLE;
-  let best = readBest();
+  let records = readRecords();
   let accumulator = 0;
   let last = performance.now();
   let ambientTimer = 0;
@@ -117,6 +106,15 @@ function runGame() {
     },
     get pestsTotal() {
       return world.pestsTotal();
+    },
+    get season() {
+      return world.season();
+    },
+    seasonFor(wave) {
+      return world.seasonFor(wave);
+    },
+    get draftOffer() {
+      return world.draftOffer();
     },
     canPlant(col, row) {
       return world.plantAt(col, row) === null;
@@ -144,13 +142,32 @@ function runGame() {
 
   function endGame(victory) {
     screen = victory ? SCREEN_VICTORY : SCREEN_DEFEAT;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
+    records = recordGame({ score: world.state.score, wave: world.state.wave, won: victory });
     announce(victory
       ? `Victory! The grove holds. Score ${world.state.score}.`
       : `Defeat on wave ${world.state.wave}. Score ${world.state.score}.`);
+  }
+
+  function backToTitle() {
+    screen = SCREEN_TITLE;
+    world.demoGarden();
+    announce('Seedwarden. Press Space or click Play to start.');
+  }
+
+  /** Pick a draft card by its index in the offer; returns true when it took. */
+  function pickDraftCard(index) {
+    const offer = world.draftOffer();
+    if (index < 0 || index >= offer.length) return false;
+    const events = world.applyDraft(offer[index].id);
+    if (!(events & EVENT_BLESSING)) {
+      audio.denied();
+      return false;
+    }
+    playEvents(events);
+    screen = SCREEN_PLAY;
+    const season = world.season();
+    announce(`The grove turns to ${season.name}.`);
+    return true;
   }
 
   function playEvents(events) {
@@ -164,11 +181,21 @@ function runGame() {
     if (events & EVENT_SELL) audio.sell();
     if (events & EVENT_WAVE_START) {
       audio.waveStart();
-      const season = seasonForWave(world.state.wave);
+      const season = world.season();
       showBanner(`WAVE ${world.state.wave}`, `${season.glyph} ${season.name} — ${season.tagline}`, 2.4);
       announce(`Wave ${world.state.wave}. ${season.name}.`);
     }
     if (events & EVENT_WAVE_CLEAR) audio.waveClear();
+    if (events & EVENT_BLESSING) {
+      audio.blessing();
+      const blessing = world.state.lastBlessing;
+      if (blessing) showBanner('BLESSING', `${blessing.glyph} ${blessing.name} — ${blessing.blurb}`, 2.8);
+    }
+    if (events & EVENT_DRAFT) {
+      audio.draft();
+      screen = SCREEN_DRAFT;
+      announce(`Wave ${world.state.wave} cleared. Choose the next season.`);
+    }
     if (events & EVENT_WIN) {
       audio.win();
       endGame(true);
@@ -281,6 +308,15 @@ function runGame() {
       handlePlayClick(x, y);
       return;
     }
+    if (screen === SCREEN_DRAFT) {
+      for (let index = 0; index < LAYOUT.draftCards.length; index += 1) {
+        if (inside(LAYOUT.draftCards[index], x, y)) {
+          if (pickDraftCard(index)) audio.click();
+          return;
+        }
+      }
+      return;
+    }
     if (screen === SCREEN_PAUSED) {
       if (inside(LAYOUT.pauseButton, x, y)) {
         screen = SCREEN_PLAY;
@@ -299,6 +335,9 @@ function runGame() {
         screen = SCREEN_PLAY;
         showBanner('ENDLESS MODE', 'The waves never stop now.', 2.4);
         announce('Endless mode.');
+      } else if (inside(LAYOUT.victoryTitle, x, y)) {
+        audio.click();
+        backToTitle();
       }
       return;
     }
@@ -306,6 +345,9 @@ function runGame() {
       if (inside(LAYOUT.defeatAgain, x, y)) {
         audio.click();
         startGame();
+      } else if (inside(LAYOUT.defeatTitle, x, y)) {
+        audio.click();
+        backToTitle();
       }
     }
   }
@@ -318,6 +360,9 @@ function runGame() {
       ui.selectedCard = ui.selectedCard === cardKey ? -1 : cardKey;
       ui.selectedPlant = null;
       audio.click();
+    }
+    if (cardKey >= 0 && cardKey < 3 && screen === SCREEN_DRAFT) {
+      if (pickDraftCard(cardKey)) audio.click();
     }
     if (keys & KEY_MUTE) audio.toggleMute();
     if (keys & KEY_SPEED && screen === SCREEN_PLAY) {
@@ -384,7 +429,7 @@ function runGame() {
     } else {
       accumulator = 0;
     }
-    renderer.draw(world.state, ui, screen, best);
+    renderer.draw(world.state, ui, screen, records);
   }
 
   // Leaving the tab pauses a running game rather than letting pests walk unseen.
@@ -399,6 +444,7 @@ function runGame() {
   window.__seedwarden = {
     world,
     screen: () => screen,
+    records: () => records,
     ui: () => ({ selectedCard: ui.selectedCard, speed: ui.speed }),
   };
 

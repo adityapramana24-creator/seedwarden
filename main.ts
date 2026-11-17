@@ -8,6 +8,12 @@
 // Serve the game locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+//
+// v2: the seasons are drafted, not fixed — game/src/draft.js offers three
+// season cards after every fifth wave, and each pick grants a permanent Grove
+// Blessing (game/src/blessings.js). Kills close together build a combo and a
+// letter grade (game/src/combo.js); best scores and furthest waves are kept in
+// localStorage (game/src/records.js).
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -10,9 +10,9 @@ export function startingSun() {
   return START_SUN;
 }
 
-/** Sunlight a kill pays: the pest's reward, scaled by the season. */
-export function killReward(pest, season) {
-  return Math.round(pest.reward * season.reward);
+/** Sunlight a kill pays: the pest's reward, scaled by the season, plus any flat blessing bonus. */
+export function killReward(pest, season, bonusSun = 0) {
+  return Math.round(pest.reward * season.reward) + bonusSun;
 }
 
 /** Sunlight for calling the next wave early, from the seconds left on the wait. */
@@ -25,9 +25,9 @@ export function refundFor(plant) {
   return sellValue(plant);
 }
 
-/** Score for a kill: the pest's reward, tenfold. */
-export function killScore(pest) {
-  return pest.reward * 10;
+/** Score for a kill: the pest's reward, tenfold, multiplied by the combo. */
+export function killScore(pest, multiplier = 1) {
+  return Math.round(pest.reward * 10 * multiplier);
 }
 
 /** Score for clearing a wave: a hundred per wave number. */

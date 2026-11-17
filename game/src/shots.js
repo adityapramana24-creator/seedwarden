@@ -1,13 +1,23 @@
-// The screenshot scenes behind ?shot=start|play|victory|defeat. Each one plays
-// the real rules forward from a fresh world for a fixed stretch, steered by a
-// simple autopilot — plant from a fixed plan, nourish what bloomed, call every
-// wave at once — so the frame is what a real game looks like and the same seed
-// always gives the same frame. The defeat scene's pilot plants two towers and
-// gives up, as a hurried player might.
+// The screenshot scenes behind ?shot=start|play|draft|victory|defeat. Each one
+// plays the real rules forward from a fresh world for a fixed stretch, steered
+// by a simple autopilot — plant from a fixed plan, nourish what bloomed, pick
+// the first draft card, call every wave at once — so the frame is what a real
+// game looks like and the same seed always gives the same frame. The defeat
+// scene's pilot plants two towers and gives up, as a hurried player might.
+//
+// The records each scene reports are honest: a fresh profile (best 0) for the
+// play and draft frames, so the HUD's BEST is the run's own score; the victory
+// frame claims NEW BEST because a fresh profile has no best yet; the start
+// frame reads the stored records, so a harness that played a real game first
+// sees its numbers on the title.
 
 import { STEP } from './config.js';
 import { EVENT_OVER, EVENT_PLANT, EVENT_WIN } from './world.js';
-import { SCREEN_DEFEAT, SCREEN_PLAY, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
+import { readRecords } from './records.js';
+import { SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_PLAY, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
+
+/** A fresh profile's records: nothing stored yet, no new best claimed. */
+const FRESH_RECORDS = { best: 0, furthest: 0, saved: 0, newBest: false };
 
 /** The autopilot's planting plan, in order: the best cells first, near the path. */
 const PLAN = [
@@ -26,9 +36,11 @@ const THINK_SECONDS = 1;
 
 /**
  * Drive the world with the autopilot until `stop` says the scene is ready, or
- * the time cap runs out. Returns the events of the last step.
+ * the time cap runs out. Returns the events of the last step. When a draft
+ * opens, the autopilot takes the first card — deterministic for a fixed seed —
+ * unless `autoDraft` is false, in which case the draft stays open for the shot.
  */
-function autoplay(world, stop, capSeconds, plan) {
+function autoplay(world, stop, capSeconds, plan, autoDraft = true) {
   const state = world.state;
   let planIndex = 0;
   let thinkTimer = 0;
@@ -38,6 +50,11 @@ function autoplay(world, stop, capSeconds, plan) {
     thinkTimer -= STEP;
     if (thinkTimer <= 0) {
       thinkTimer += THINK_SECONDS;
+      // A draft is a pause, not a wall: take the first card and keep playing.
+      if (state.waveState === 'draft' && autoDraft) {
+        const offer = world.draftOffer();
+        if (offer.length > 0) world.applyDraft(offer[0].id);
+      }
       // Plant the next tower on the plan whenever the purse allows it.
       while (planIndex < plan.length) {
         const [kind, col, row] = plan[planIndex];
@@ -67,48 +84,62 @@ function stageStart(world) {
     world.spawnAmbient(index === 0 ? 'moth' : 'aphid');
     for (let step = 0; step < 6 / STEP; step += 1) world.step(STEP, true);
   }
-  return { screen: SCREEN_TITLE, best: 0 };
+  return { screen: SCREEN_TITLE, records: readRecords() };
 }
 
 function stagePlay(world) {
   world.reset();
-  // Wave 13: a moth swarm in autumn, fast enough to spread across the path's
-  // legs within the wait, and an orange season the other shots don't show.
+  // Wave 20, the boss fight: the Blight leads the wave, so once it is on the
+  // field with company, wait a few seconds for the swarm to spread and the
+  // combo to build before freezing the frame.
   let waveTimer = -1;
   autoplay(
     world,
     (state) => {
-      if (state.wave >= 13 && (state.waveState === 'spawning' || state.waveState === 'fighting')) {
-        if (waveTimer < 0) waveTimer = 8;
-        waveTimer -= STEP;
-        return waveTimer <= 0 && state.pests.length >= 4;
+      if (state.wave >= 20 && (state.waveState === 'spawning' || state.waveState === 'fighting')) {
+        const blight = state.pests.some((pest) => pest.type === 'blight');
+        if (blight && state.pests.length >= 4) {
+          if (waveTimer < 0) waveTimer = 6;
+          waveTimer -= STEP;
+          return waveTimer <= 0;
+        }
       }
       return state.over || state.won;
     },
-    1500,
+    2400,
     PLAN,
   );
-  return { screen: SCREEN_PLAY, best: world.state.score };
+  return { screen: SCREEN_PLAY, records: FRESH_RECORDS };
+}
+
+function stageDraft(world) {
+  world.reset();
+  // The first draft, after wave 5: the autopilot leaves the offer open so the
+  // frame shows the three cards and the grove behind them.
+  autoplay(world, (state) => state.waveState === 'draft', 900, PLAN, false);
+  return { screen: SCREEN_DRAFT, records: FRESH_RECORDS };
 }
 
 function stageVictory(world) {
   world.reset();
   autoplay(world, (state, events) => Boolean(events & EVENT_WIN) || state.over, 2400, PLAN);
-  return { screen: SCREEN_VICTORY, best: world.state.score };
+  return { screen: SCREEN_VICTORY, records: { best: 0, furthest: 0, saved: 0, newBest: true } };
 }
 
 function stageDefeat(world) {
   world.reset();
   autoplay(world, (state, events) => Boolean(events & EVENT_OVER), 1200, [['thorn', 9, 2], ['thorn', 2, 2]]);
-  return { screen: SCREEN_DEFEAT, best: world.state.score };
+  return { screen: SCREEN_DEFEAT, records: FRESH_RECORDS };
 }
 
 /**
- * Set `world` to the named scene (start, play, victory or defeat; any other
- * name is start) and return the screen to draw over it and the best score.
+ * Set `world` to the named scene (start, play, draft, victory or defeat; any
+ * other name is start) and return the screen to draw over it and the records
+ * to show on it.
  */
 export function stageShot(name, world) {
   if (name === 'play') return stagePlay(world);
+  if (name === 'draft') return stageDraft(world);
   if (name === 'victory') return stageVictory(world);
   if (name === 'defeat') return stageDefeat(world);
   return stageStart(world);

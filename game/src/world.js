@@ -1,14 +1,18 @@
 // The game's rules and state, with no drawing and no browser in it: the garden
 // grid, the plants and their growth, the pests walking the path, combat, the
-// seasons, the waves, sunlight and score. step() advances one fixed step and
-// returns what happened as bit flags, so the caller can react (sounds, screens)
-// without the world knowing about them. Nothing here allocates after createWorld
-// returns, apart from the small arrays a wave's spawn queue needs.
+// seasons the player drafts, the blessings the grove grants, the combo and the
+// waves, sunlight and score. step() advances one fixed step and returns what
+// happened as bit flags, so the caller can react (sounds, screens) without the
+// world knowing about them. Nothing here allocates after createWorld returns,
+// apart from the small arrays a wave's spawn queue needs.
 
 import { BOARD, EARLY_BONUS, START_SUN, TREE_HEARTS, WAVE_WAIT, WAVES_PER_YEAR, WAYPOINTS, cellCentre, isPlantable } from './config.js';
 import { GROWTH_SECONDS, HARVEST_SECONDS, NOURISH_DAMAGE, PLANTS, nourishCost, plantDamage, plantHarvest, plantRange, plantById, sellValue } from './plants.js';
 import { PESTS, pestMaxHp, pestSpeed } from './pests.js';
-import { seasonForWave } from './seasons.js';
+import { SEASON_LENGTH } from './seasons.js';
+import { STARTING_CARD, cardById, drawOffer, isDraftWave, seasonOfCard } from './draft.js';
+import { blessingById, blessingMods, drawFlawlessBlessing } from './blessings.js';
+import { COMBO_WINDOW, comboMultiplier } from './combo.js';
 import { earlyCallBonus, killReward, killScore, startingSun, waveScore } from './economy.js';
 import { waveGroups, wavePreview, waveSize } from './waves.js';
 
@@ -25,6 +29,8 @@ export const EVENT_SELL = 512;
 export const EVENT_DENIED = 1024;
 export const EVENT_GROW = 2048;
 export const EVENT_SHOOT = 4096;
+export const EVENT_DRAFT = 8192;
+export const EVENT_BLESSING = 16384;
 
 const MAX_PARTICLES = 320;
 const MAX_FLOATS = 40;
@@ -51,6 +57,7 @@ export function createWorld(random) {
     spawnTimer: 0,
     waitTimer: WAVE_WAIT,
     hearts: TREE_HEARTS,
+    maxHearts: TREE_HEARTS,
     kills: 0,
     leaked: 0,
     earned: 0,
@@ -61,10 +68,53 @@ export function createWorld(random) {
     won: false,
     over: false,
     best: 0,
+    // The drafted year: block 0 is always Bloom Spring; later blocks are the
+    // cards the player picked, keyed by block index (waves 6-10 are block 1).
+    seasonPlan: {},
+    currentCard: STARTING_CARD,
+    // The three cards on offer while the game waits for a draft pick, else null.
+    draftOffer: null,
+    // Blessing ids the grove has granted this run, in the order they arrived.
+    blessings: [],
+    // The last blessing granted (or a consolation note), for the banner.
+    lastBlessing: null,
+    // The flawless-season gift granted at the draft now open, else null.
+    flawlessGift: null,
+    // The kill streak: count, seconds left on it, and the run's longest.
+    combo: { count: 0, timer: 0, longest: 0 },
+    // Leaks in the current five-wave season: zero at its end earns a blessing.
+    leaksThisSeason: 0,
   };
 
+  /** The combined rule changes of the blessings held this run. */
+  function mods() {
+    return blessingMods(state.blessings);
+  }
+
+  /**
+   * The season a wave plays under: block 0 is Bloom Spring; a drafted block is
+   * the card picked for it; a block not drafted yet has no season at all.
+   */
+  function seasonFor(wave) {
+    const block = Math.floor((wave - 1) / SEASON_LENGTH);
+    if (block === 0) return seasonOfCard(cardById(STARTING_CARD));
+    const cardId = state.seasonPlan[block];
+    if (!cardId) return null;
+    return seasonOfCard(cardById(cardId));
+  }
+
+  /**
+   * The season in force right now: the coming wave's while the garden waits
+   * (so a fresh draft takes effect the moment it is picked), the current
+   * wave's while it is being fought, and the last drafted one while a draft
+   * is still open.
+   */
   function season() {
-    return seasonForWave(state.wave === 0 ? 1 : state.wave);
+    if (state.waveState === 'idle') {
+      return seasonFor(state.wave + 1) ?? seasonFor(Math.max(state.wave, 1));
+    }
+    if (state.waveState === 'draft') return seasonFor(Math.max(state.wave, 1));
+    return seasonFor(Math.max(state.wave, 1));
   }
 
   function reset() {
@@ -80,6 +130,7 @@ export function createWorld(random) {
     state.spawnTimer = 0;
     state.waitTimer = WAVE_WAIT;
     state.hearts = TREE_HEARTS;
+    state.maxHearts = TREE_HEARTS;
     state.kills = 0;
     state.leaked = 0;
     state.earned = 0;
@@ -89,6 +140,16 @@ export function createWorld(random) {
     state.endless = false;
     state.won = false;
     state.over = false;
+    state.seasonPlan = {};
+    state.currentCard = STARTING_CARD;
+    state.draftOffer = null;
+    state.blessings.length = 0;
+    state.lastBlessing = null;
+    state.flawlessGift = null;
+    state.combo.count = 0;
+    state.combo.timer = 0;
+    state.combo.longest = 0;
+    state.leaksThisSeason = 0;
   }
 
   function burst(x, y, color, count, speed) {
@@ -143,11 +204,11 @@ export function createWorld(random) {
     return EVENT_PLANT;
   }
 
-  /** Nourish a bloomed plant once: +50% damage for half its price. */
+  /** Nourish a bloomed plant once: +50% damage for half its price (free with Nourishroot). */
   function nourish(plant) {
     const def = plantById(plant.kind);
     if (plant.stage < 2 || plant.nourished) return EVENT_DENIED;
-    const cost = nourishCost(def);
+    const cost = nourishCost(def, mods());
     if (state.sun < cost) return EVENT_DENIED;
     state.sun -= cost;
     plant.nourished = true;
@@ -201,6 +262,8 @@ export function createWorld(random) {
       state.earned += bonus;
     }
     state.wave += 1;
+    // A new five-wave season starts its own flawless count.
+    if ((state.wave - 1) % SEASON_LENGTH === 0) state.leaksThisSeason = 0;
     const groups = waveGroups(state.wave);
     state.spawnQueue = [];
     for (const group of groups) {
@@ -216,13 +279,22 @@ export function createWorld(random) {
     if (amount >= 1) floatText(pest.x, pest.y - pest.radius - 6, String(Math.round(amount)), color ?? '#ffffff');
     if (pest.hp <= 0) {
       const def = PESTS[pest.type];
-      const reward = killReward(def, season());
+      // The kill feeds the combo first: the streak multiplies the score it pays.
+      state.combo.count += 1;
+      state.combo.timer = COMBO_WINDOW;
+      if (state.combo.count > state.combo.longest) state.combo.longest = state.combo.count;
+      const multiplier = comboMultiplier(state.combo.count);
+      const reward = killReward(def, season(), mods().bonusSun);
       state.sun += reward;
       state.earned += reward;
-      state.score += killScore(def);
+      state.score += killScore(def, multiplier);
       state.kills += 1;
       burst(pest.x, pest.y, def.body, 12, 90);
       floatText(pest.x, pest.y - pest.radius - 18, `+${reward}`, '#f2b705');
+      if (multiplier > 1) {
+        const shown = Number.isInteger(multiplier) ? String(multiplier) : multiplier.toFixed(2).replace(/0$/, '');
+        floatText(pest.x, pest.y - pest.radius - 34, `\u00D7${shown}`, '#f2b705');
+      }
       return true;
     }
     return false;
@@ -231,7 +303,8 @@ export function createWorld(random) {
   function firePlant(plant, def) {
     let target = null;
     let bestProgress = -1;
-    const range = plantRange(def, plant.stage);
+    const blessing = mods();
+    const range = plantRange(def, plant.stage, blessing);
     for (const pest of state.pests) {
       if (pest.hp <= 0) continue;
       if (distance(plant.x, plant.y, pest.x, pest.y) > range) continue;
@@ -241,24 +314,25 @@ export function createWorld(random) {
       }
     }
     if (!target) return 0;
-    const damage = plantDamage(def, plant.stage, plant.nourished, season());
+    const damage = plantDamage(def, plant.stage, plant.nourished, season(), blessing);
     plant.cooldown = 1 / def.rate;
     plant.flash = 0.12;
     burst(target.x, target.y, def.shot, 4, 50);
     if (def.splash > 0) {
+      const splash = def.splash * blessing.splash;
       for (const pest of state.pests) {
         if (pest.hp <= 0) continue;
-        if (distance(target.x, target.y, pest.x, pest.y) > def.splash) continue;
+        if (distance(target.x, target.y, pest.x, pest.y) > splash) continue;
         if (def.poison > 0) {
-          pest.poisonUntil = state.elapsed + def.poisonSeconds;
-          pest.poisonDps = def.poison * (plant.nourished ? NOURISH_DAMAGE : 1);
+          pest.poisonUntil = state.elapsed + def.poisonSeconds * blessing.poisonSeconds;
+          pest.poisonDps = def.poison * blessing.poison * (plant.nourished ? NOURISH_DAMAGE : 1);
         }
         damagePest(pest, damage, def.shot);
       }
       burst(target.x, target.y, def.color, 10, 110);
     } else {
       if (def.slow > 0) {
-        target.slowUntil = state.elapsed + def.slowSeconds;
+        target.slowUntil = state.elapsed + def.slowSeconds * blessing.slow;
         target.slowFactor = 1 - def.slow;
       }
       damagePest(target, damage, def.shot);
@@ -268,7 +342,8 @@ export function createWorld(random) {
 
   function stepPlants(dt) {
     let events = 0;
-    const growthRate = season().growth;
+    const blessing = mods();
+    const growthRate = season().growth * blessing.growth;
     for (const plant of state.plants) {
       const def = plantById(plant.kind);
       if (plant.flash > 0) plant.flash = Math.max(0, plant.flash - dt);
@@ -285,7 +360,7 @@ export function createWorld(random) {
         plant.harvestTimer -= dt;
         if (plant.harvestTimer <= 0) {
           plant.harvestTimer += HARVEST_SECONDS;
-          const amount = plantHarvest(plant.stage);
+          const amount = plantHarvest(plant.stage, blessing);
           state.sun += amount;
           state.earned += amount;
           floatText(plant.x, plant.y - 30, `+${amount}`, '#f2b705');
@@ -355,6 +430,10 @@ export function createWorld(random) {
         if (harmless) continue;
         state.hearts -= def.damage;
         state.leaked += 1;
+        state.leaksThisSeason += 1;
+        // A leak spends the combo as well as a heart.
+        state.combo.count = 0;
+        state.combo.timer = 0;
         state.shake = 0.45;
         burst(pest.x, pest.y, '#e5534b', 14, 100);
         events |= EVENT_LEAK;
@@ -424,11 +503,69 @@ export function createWorld(random) {
       if (state.wave >= WAVES_PER_YEAR && !state.endless && !harmless) {
         state.won = true;
         events |= EVENT_WIN;
+      } else if (isDraftWave(state.wave) && !harmless) {
+        // A season ends: a flawless one earns a kept-back blessing first,
+        // then the grove turns and the player drafts the next season.
+        if (state.leaksThisSeason === 0) {
+          const gift = drawFlawlessBlessing(random, state.blessings);
+          if (gift) {
+            grantBlessing(gift);
+            state.flawlessGift = blessingById(gift);
+            events |= EVENT_BLESSING;
+          }
+        }
+        state.draftOffer = drawOffer(random, state.blessings, state.currentCard);
+        state.waveState = 'draft';
+        events |= EVENT_DRAFT;
       } else {
         state.waveState = 'idle';
         state.waitTimer = WAVE_WAIT;
       }
     }
+    return events;
+  }
+
+  /** Grant a blessing the grove owes the player: Heartwood pays its hearts at once. */
+  function grantBlessing(id) {
+    if (state.blessings.includes(id)) return false;
+    state.blessings.push(id);
+    const blessing = blessingById(id);
+    if (id === 'heartwood') {
+      state.maxHearts += 2;
+      state.hearts = Math.min(state.maxHearts, state.hearts + 2);
+    }
+    state.lastBlessing = blessing;
+    return true;
+  }
+
+  /** The cards on offer while a draft is open, or null when no draft is open. */
+  function draftOffer() {
+    return state.draftOffer;
+  }
+
+  /**
+   * Pick a season card: its season rules the next five waves, and its blessing
+   * joins the grove (or, when the blessing is already held, the grove pays
+   * sunlight instead). Only valid while a draft is open.
+   */
+  function applyDraft(cardId) {
+    if (state.waveState !== 'draft' || !state.draftOffer) return 0;
+    const card = state.draftOffer.find((offered) => offered.id === cardId);
+    if (!card) return 0;
+    const block = Math.floor(state.wave / SEASON_LENGTH);
+    state.seasonPlan[block] = card.id;
+    state.currentCard = card.id;
+    state.draftOffer = null;
+    state.flawlessGift = null;
+    state.waveState = 'idle';
+    state.waitTimer = WAVE_WAIT;
+    let events = 0;
+    if (!grantBlessing(card.blessing)) {
+      state.sun += 75;
+      state.earned += 75;
+      state.lastBlessing = { name: 'Sunlight Gift', glyph: '\u2600', blurb: 'Blessing already held: +75 sunlight instead.' };
+    }
+    events |= EVENT_BLESSING;
     return events;
   }
 
@@ -439,6 +576,14 @@ export function createWorld(random) {
   function step(dt, harmless) {
     let events = 0;
     state.elapsed += dt;
+    // The combo spends itself after three quiet seconds.
+    if (state.combo.timer > 0) {
+      state.combo.timer -= dt;
+      if (state.combo.timer <= 0) {
+        state.combo.count = 0;
+        state.combo.timer = 0;
+      }
+    }
     events |= stepPlants(dt);
     const killsBefore = state.kills;
     events |= stepPests(dt, harmless);
@@ -510,6 +655,9 @@ export function createWorld(random) {
     pestsLeft,
     pestsTotal,
     season,
+    seasonFor,
+    draftOffer,
+    applyDraft,
     preview: () => wavePreview(state.wave + 1),
   };
 }

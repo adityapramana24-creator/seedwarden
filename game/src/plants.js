@@ -145,23 +145,24 @@ export function plantById(id) {
   return PLANTS.find((plant) => plant.id === id) ?? null;
 }
 
-/** Damage of one shot from this plant, at its stage, nourished or not, this season. */
-export function plantDamage(plant, stage, nourished, season) {
-  return plant.damage * STAGE_DAMAGE[stage] * (nourished ? NOURISH_DAMAGE : 1) * season.damage;
+/** Damage of one shot from this plant, at its stage, nourished or not, this season and these blessings. */
+export function plantDamage(plant, stage, nourished, season, mods) {
+  return plant.damage * STAGE_DAMAGE[stage] * (nourished ? NOURISH_DAMAGE : 1) * season.damage * (mods?.damage ?? 1);
 }
 
-/** Range in pixels of this plant, at its stage. */
-export function plantRange(plant, stage) {
-  return plant.range * STAGE_RANGE[stage];
+/** Range in pixels of this plant, at its stage and these blessings. */
+export function plantRange(plant, stage, mods) {
+  return plant.range * STAGE_RANGE[stage] * (mods?.range ?? 1);
 }
 
-/** Sunlight one harvest of this Sunspore pays, at its stage. */
-export function plantHarvest(stage) {
-  return STAGE_HARVEST[stage];
+/** Sunlight one harvest of this Sunspore pays, at its stage and these blessings. */
+export function plantHarvest(stage, mods) {
+  return STAGE_HARVEST[stage] + (mods?.harvest ?? 0);
 }
 
-/** Sunlight to nourish a bloomed plant once. */
-export function nourishCost(plant) {
+/** Sunlight to nourish a bloomed plant once — free with the Nourishroot blessing. */
+export function nourishCost(plant, mods) {
+  if (mods?.nourishFree) return 0;
   return Math.round(plant.cost * NOURISH_COST_SHARE);
 }
 

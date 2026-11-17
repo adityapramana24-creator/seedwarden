@@ -67,9 +67,9 @@ export function isPlantable(col, row) {
 }
 
 export const PALETTE = {
-  backdrop: '#1d2b1a',
-  board: '#3e6b34',
-  boardAlt: '#38612f',
+  backdrop: '#1e3320',
+  board: '#3a6b32',
+  boardAlt: '#335f2d',
   soil: '#8a6a45',
   soilEdge: '#77582f',
   panel: '#f3ead3',
@@ -77,11 +77,13 @@ export const PALETTE = {
   card: '#fbf6e6',
   cardEdge: '#b7a76e',
   cardAfford: '#2f6b2f',
-  hud: '#2c4a26',
+  hud: '#223d1e',
   text: '#22301f',
   textLight: '#f3ead3',
   muted: '#6b7a5e',
   sun: '#f2b705',
+  gold: '#f2b705',
+  blight: '#7c5cbf',
   heart: '#e5534b',
   title: '#fbf6e6',
   button: '#4a7c3a',
@@ -97,3 +99,7 @@ export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
 /** Where the best score is kept between visits (this browser only). */
 export const BEST_KEY = 'seedwarden.best';
+/** Where the furthest wave reached is kept between visits. */
+export const FURTHEST_KEY = 'seedwarden.furthest';
+/** Where the count of groves saved (years won) is kept between visits. */
+export const SAVED_KEY = 'seedwarden.saved';

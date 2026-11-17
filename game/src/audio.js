@@ -121,6 +121,26 @@ export function createAudio() {
         tone(context, master, 784, 0.2, 'sine', 0.25, now + 0.2);
       });
     },
+    draft() {
+      // A turning chime: three notes that rise, then settle, like a page turning.
+      play((now) => {
+        tone(context, master, 440, 0.16, 'triangle', 0.28, now);
+        tone(context, master, 587, 0.16, 'triangle', 0.28, now + 0.12);
+        tone(context, master, 523, 0.24, 'triangle', 0.28, now + 0.24);
+      });
+    },
+    blessing() {
+      // A warm shimmer: a fifth, then its octave, held briefly.
+      play((now) => {
+        tone(context, master, 659, 0.22, 'sine', 0.3, now);
+        tone(context, master, 988, 0.22, 'sine', 0.25, now + 0.08);
+        tone(context, master, 1319, 0.3, 'sine', 0.2, now + 0.16);
+      });
+    },
+    combo() {
+      // A short tick that climbs: the combo is building.
+      play((now) => tone(context, master, 740, 0.08, 'triangle', 0.18, now, 1180));
+    },
     win() {
       play((now) => {
         const notes = [523, 659, 784, 1047];

@@ -5,10 +5,10 @@
 [![reward](https://make.fun/badge/best-game-01/adityapramana24-creator/seedwarden/reward.svg)](https://make.fun/bounty/best-game-01?utm_source=github&utm_medium=readme&utm_campaign=best-game-01)
 
 A garden tower defense for make.fun's `best-game-01` bounty: plant living
-towers, grow them through four seasons, and hold the Heart Tree through twenty
-waves of pests. It runs in a desktop browser from static files, offline, with
-keyboard and mouse — no build step, no network request, no sound files (all
-sound is synthesized with the Web Audio API).
+towers, **draft the seasons**, and hold the Heart Tree through twenty waves of
+pests. It runs in a desktop browser from static files, offline, with keyboard
+and mouse — no build step, no network request, no sound files (all sound is
+synthesized with the Web Audio API).
 
 ## The game
 
@@ -26,21 +26,30 @@ Every plant is planted as a seed and grows through three visible stages —
 seed, sprout, bloom — gaining damage and range as it grows. A bloomed plant can
 be nourished once (+50% damage) or sold back for most of its price.
 
-The year turns as you play, five waves a season: **spring** grows plants twice
-as fast, **summer** adds +25% damage, **autumn** pays +50% sunlight per kill,
-and **winter** slows the pests down but makes them tougher and halves growth.
+You choose the seasons. The first five waves are always Bloom Spring; after
+every fifth wave the game pauses and offers **three season cards** — eight in
+all, from Stormspring (fast growth, quicker pests) to Frostfall (pests crawl,
+plants hit softer) — and each pick grants a permanent **Grove Blessing**
+(ten to collect: Thornward, Deeproots, Sunwell, Heartwood, and more). A
+flawless season, with no leaks at all, earns a bonus blessing. Kills close
+together build a **combo** (up to ×8 score) and a live **letter grade**
+(S/A/B/C/D), shown in the HUD and big on the victory screen.
+
 Five pests march the path — aphids, moths, beetles, regenerating slugs — and on
 wave 20, the Blight itself, spawning aphids as it crawls. Clear all twenty
-waves to win, then keep going in endless mode.
+waves to win, then keep going in endless mode. Best scores, furthest waves and
+groves saved are kept in localStorage, no network involved.
 
 ## How to play
 
 Click a plant card (or press 1–6), then click a grass cell to plant it. Click
 a planted tower to nourish or sell it. Press Space (or the START WAVE button)
-to call the next wave early for a sunlight bonus.
+to call the next wave early for a sunlight bonus. When a draft opens, click a
+season card (or press 1–3) to choose the next five waves.
 
 - **1–6** pick a plant · **click** plant / select · **Space** start wave
-- **F** speed 1×/2× · **P** pause · **M** mute · **Esc** cancel / back
+- **1–3** pick a season card (draft) · **F** speed 1×/2× · **P** pause
+- **M** mute · **Esc** cancel / back
 
 ## Play it
 
@@ -52,10 +61,11 @@ node serve.ts
 ## Layout
 
 - `game/` — the game itself: `index.html` plus ES modules in `src/`
-  (`config`, `world`, `plants`, `pests`, `waves`, `seasons`, `economy`,
-  `input`, `audio`, `render`, `shots`, `main`). No library, no assets.
+  (`config`, `world`, `plants`, `pests`, `waves`, `seasons`, `draft`,
+  `blessings`, `combo`, `records`, `economy`, `input`, `audio`, `render`,
+  `shots`, `main`). No library, no assets.
 - `screenshots/` — four real renders of the game's own code, staged by
-  `game/src/shots.js` from `shots.json` (the cover is the mid-game frame).
+  `game/src/shots.js` from `shots.json` (the cover is the wave-20 boss fight).
 - `main.ts` — the entry program: copies `game/` and `screenshots/` to
   `/output` and writes `dossier.json` with the vendored make.fun library.
 - `vendor/makefun-game.ts` — the kit's copy, unchanged.
