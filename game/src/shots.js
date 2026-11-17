@@ -12,13 +12,14 @@
 // sees its numbers on the title.
 
 import { STEP } from './config.js';
-import { EVENT_OVER, EVENT_PLANT, EVENT_WIN } from './world.js';
+import { EVENT_MOONBEAM, EVENT_OVER, EVENT_PLANT, EVENT_WIN } from './world.js';
+import { WARDEN_AURA_RADIUS, WARDEN_HOME, wardenInZapRange } from './warden.js';
 import { featsFor } from './feats.js';
 import { readRecords } from './records.js';
 import { SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_PLAY, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
 
 /** A fresh profile's records: nothing stored yet, no new best claimed. */
-const FRESH_RECORDS = { best: 0, furthest: 0, saved: 0, feats: [], seeds: 0, seedsBanked: 0, newBest: false };
+const FRESH_RECORDS = { best: 0, furthest: 0, saved: 0, feats: [], seeds: 0, seedsBanked: 0, newBest: false, greenhouse: [] };
 
 /** The autopilot's planting plan, in order: the best cells first, near the path. */
 const PLAN = [
@@ -40,8 +41,10 @@ const THINK_SECONDS = 1;
  * the time cap runs out. Returns the events of the last step. When a draft
  * opens, the autopilot takes the first card — deterministic for a fixed seed —
  * unless `autoDraft` is false, in which case the draft stays open for the shot.
+ * The autopilot also drives the Warden — to the fight, and zapping — unless
+ * `useWarden` is false, as in the defeat scene, where the player has stopped.
  */
-function autoplay(world, stop, capSeconds, plan, autoDraft = true) {
+function autoplay(world, stop, capSeconds, plan, autoDraft = true, useWarden = true) {
   const state = world.state;
   let planIndex = 0;
   let thinkTimer = 0;
@@ -67,6 +70,31 @@ function autoplay(world, stop, capSeconds, plan, autoDraft = true) {
       if (planIndex >= plan.length || state.sun > 300) {
         for (const plant of state.plants) {
           if (plant.stage === 2 && !plant.nourished && state.sun > 150) world.nourish(plant);
+        }
+      }
+      // The Warden is a player, not scenery: it glides to the thick of the
+      // fight — beside the Blight when the boss walks, over the most
+      // advanced pests otherwise — and zaps the toughest pest in reach.
+      // Never the Blight: the play shot needs its phase-2 walk, and clearing
+      // the swarm so the towers can focus the boss is the honest tactic.
+      if (useWarden) {
+        const blight = state.pests.find((pest) => pest.type === 'blight');
+        if (blight) {
+          world.moveWarden(blight.x - 80, blight.y - 40);
+        } else if (state.pests.length > 0) {
+          const front = [...state.pests].sort((a, b) => b.progress - a.progress).slice(0, 3);
+          const cx = front.reduce((sum, pest) => sum + pest.x, 0) / front.length;
+          const cy = front.reduce((sum, pest) => sum + pest.y, 0) / front.length;
+          world.moveWarden(cx, cy - 20);
+        } else {
+          world.moveWarden(WARDEN_HOME.x, WARDEN_HOME.y);
+        }
+        if (world.wardenStatus().ready) {
+          const inRange = state.pests.filter((pest) => pest.type !== 'blight' && wardenInZapRange(state.warden, pest));
+          if (inRange.length > 0) {
+            const target = inRange.sort((a, b) => b.hp - a.hp)[0];
+            world.zapPest(target);
+          }
         }
       }
       // Never wait out the countdown: call the next wave at once, bonus and all.
@@ -117,6 +145,8 @@ function stagePlay(world) {
           && state.tracers.length >= 5
           && state.combo.count >= 3
           && world.sunburstStatus().ready
+          && state.warden.zaps > 0
+          && Math.hypot(state.warden.x - blight.x, state.warden.y - blight.y) <= WARDEN_AURA_RADIUS
         ) return true;
       }
       return state.over || state.won;
@@ -124,7 +154,23 @@ function stagePlay(world) {
     2400,
     PLAY_PLAN,
   );
-  return { screen: SCREEN_PLAY, records: FRESH_RECORDS };
+  // The cover's moment: the Moonbeam fires as the frame freezes — the beam in
+  // the air, the banner up, the moon's charge spent. The beam is real (fired
+  // through the world's own rules, at the densest row); the banner is what
+  // live play would show a third of a second after the same keypress. The
+  // frame is taken the instant the beam fires: the tracers alive at the
+  // freeze (five or more, by the stop condition) are all still in the air,
+  // and the beam's own damage numbers are just appearing. Waiting even a
+  // third of a second lets the beam thin the field and the tracers decay
+  // faster than the thinned garden can replace them.
+  let banner = null;
+  if (world.moonbeamStatus().ready) {
+    const events = world.moonbeam();
+    if (events & EVENT_MOONBEAM) {
+      banner = { title: 'MOONBEAM!', sub: 'The moon answers the grove.', until: world.state.elapsed + 1.6 };
+    }
+  }
+  return { screen: SCREEN_PLAY, records: FRESH_RECORDS, banner };
 }
 
 function stageDraft(world) {
@@ -140,12 +186,14 @@ function stageVictory(world) {
   autoplay(world, (state, events) => Boolean(events & EVENT_WIN) || state.over, 2400, PLAN);
   // A fresh profile's victory: the run's own feats are the seeds it banks.
   const banked = featsFor(world.state).length;
-  return { screen: SCREEN_VICTORY, records: { best: 0, furthest: 0, saved: 0, feats: [], seeds: banked, seedsBanked: banked, newBest: true } };
+  return { screen: SCREEN_VICTORY, records: { best: 0, furthest: 0, saved: 0, feats: [], seeds: banked, seedsBanked: banked, newBest: true, greenhouse: [] } };
 }
 
 function stageDefeat(world) {
   world.reset();
-  autoplay(world, (state, events) => Boolean(events & EVENT_OVER), 1200, [['thorn', 9, 2], ['thorn', 2, 2]]);
+  // No Warden: the scene is a player who stopped playing, and the Warden
+  // only moves when the player moves it.
+  autoplay(world, (state, events) => Boolean(events & EVENT_OVER), 1200, [['thorn', 9, 2], ['thorn', 2, 2]], true, false);
   return { screen: SCREEN_DEFEAT, records: FRESH_RECORDS };
 }
 

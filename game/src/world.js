@@ -5,12 +5,19 @@
 // the Sunburst hero ability, the draft's reroll, the champions and the Blight's
 // three phases, and the feats a run can earn. Since v4 there are three
 // champions (Gloomcap walks wave 5) and the panel forecasts the three waves
-// after the next one. step() advances one fixed step
+// after the next one. Since v5 kills charge moonlight for the Moonbeam hero
+// ability, and the Greenhouse's grown upgrades strengthen every new run.
+// Since v6 the Warden walks the garden — a guardian wisp the player moves,
+// whose aura strengthens nearby plants and whose zap strikes one pest —
+// blessings can deepen to level 2, each five-wave block keeps its own
+// kills-and-leaks ledger for the end panel's grades, and a run can be
+// replayed on its exact seed. step() advances one fixed step
 // and returns what happened as bit flags, so the caller can react (sounds,
 // screens) without the world knowing about them. Nothing here allocates after
 // createWorld returns, apart from the small arrays a wave's spawn queue needs.
 
 import { BOARD, EARLY_BONUS, WAVE_WAIT, WAVES_PER_YEAR, WAYPOINTS, cellCentre, isPlantable } from './config.js';
+import { createRandom } from './random.js';
 import { GROWTH_SECONDS, HARVEST_SECONDS, NOURISH_DAMAGE, PLANTS, nourishCost, plantDamage, plantHarvest, plantRange, plantById, sellValue } from './plants.js';
 import { PESTS, blightPhase, blightPhaseRules, isChampion, pestMaxHp, pestSpeed } from './pests.js';
 import { SEASON_LENGTH } from './seasons.js';
@@ -20,6 +27,14 @@ import { COMBO_WINDOW, comboMultiplier } from './combo.js';
 import { earlyCallBonus, killReward, killScore, waveScore } from './economy.js';
 import { waveForecast, waveGroups, wavePreview, waveSize } from './waves.js';
 import { DEFAULT_DIFFICULTY, difficultyById } from './difficulty.js';
+import {
+  MOONBEAM_BEAM_SECONDS, MOONBEAM_COST, MOONBEAM_DAMAGE, MOONBEAM_SLOW, MOONBEAM_SLOW_SECONDS,
+  MOONLIGHT_MAX, MOONLIGHT_PER_KILL, pickMoonbeamRow, rowOf,
+} from './moonbeam.js';
+import {
+  WARDEN_BOLT_SECONDS, WARDEN_HOME, WARDEN_SPEED, WARDEN_ZAP_COOLDOWN,
+  WARDEN_ZAP_DAMAGE, clampToBoard, wardenAuraMul, wardenInZapRange, wardenZapTarget,
+} from './warden.js';
 
 export const EVENT_KILL = 1;
 export const EVENT_LEAK = 2;
@@ -40,6 +55,8 @@ export const EVENT_BOSS_PHASE = 32768;
 export const EVENT_SUNBURST = 65536;
 export const EVENT_CHAMPION = 131072;
 export const EVENT_REROLL = 262144;
+export const EVENT_MOONBEAM = 524288;
+export const EVENT_WARDEN_ZAP = 1048576;
 
 const MAX_PARTICLES = 320;
 const MAX_FLOATS = 40;
@@ -76,6 +93,14 @@ export function createWorld(random) {
     tracers: [],
     // The run's own ledger: the cumulative score after each wave cleared.
     waveScores: [],
+    // One ledger per five-wave block: the kills and leaks of waves 1-5,
+    // 6-10, 11-15 and 16-20, for the end panel's per-block grades.
+    blockStats: [
+      { kills: 0, leaked: 0 },
+      { kills: 0, leaked: 0 },
+      { kills: 0, leaked: 0 },
+      { kills: 0, leaked: 0 },
+    ],
     sun: difficultyById(DEFAULT_DIFFICULTY).sun,
     score: 0,
     wave: 0,
@@ -99,6 +124,25 @@ export function createWorld(random) {
     difficulty: difficultyById(DEFAULT_DIFFICULTY),
     // Seconds until the Sunburst can fire again (0 means ready).
     sunburstCooldown: 0,
+    // Moonlight charged by kills (0-100): a full charge fires the Moonbeam.
+    moonlight: 0,
+    // The Moonbeam's strike, while it is still visible: the row it hit, the
+    // impact point, and the sim time it fades at. Null when no beam is showing.
+    moonbeam: null,
+    // The Warden, the grove's guardian wisp: where it hovers, where it is
+    // gliding to, the seconds until its zap can fire again, how many zaps
+    // this run has fired, and the bolt's target while it is still visible.
+    warden: {
+      x: WARDEN_HOME.x, y: WARDEN_HOME.y,
+      tx: WARDEN_HOME.x, ty: WARDEN_HOME.y,
+      zapCooldown: 0,
+      zaps: 0,
+      zap: null,
+    },
+    // The Greenhouse's gifts to this run: a multiplier on every shot's damage
+    // and on every kill's sunlight, set at reset from the grown upgrades.
+    greenhouseDamage: 1,
+    greenhouseSun: 1,
     // Champions felled this run, and their names in the order they fell.
     championsFelled: 0,
     championsSlain: [],
@@ -124,6 +168,9 @@ export function createWorld(random) {
     draftOffer: null,
     // Blessing ids the grove has granted this run, in the order they arrived.
     blessings: [],
+    // Each blessing's level (1 or 2): a drafted card can deepen a held
+    // blessing to level 2 instead of granting a new one.
+    blessingLevels: {},
     // The last blessing granted (or a consolation note), for the banner.
     lastBlessing: null,
     // The flawless-season gift granted at the draft now open, else null.
@@ -136,7 +183,12 @@ export function createWorld(random) {
 
   /** The combined rule changes of the blessings held this run. */
   function mods() {
-    return blessingMods(state.blessings);
+    return blessingMods(state.blessings, state.blessingLevels);
+  }
+
+  /** The five-wave block the current wave belongs to (0-3); endless waves count as the last block. */
+  function blockIndex() {
+    return Math.min(3, Math.max(0, Math.floor((state.wave - 1) / SEASON_LENGTH)));
   }
 
   /**
@@ -165,9 +217,15 @@ export function createWorld(random) {
     return seasonFor(Math.max(state.wave, 1));
   }
 
-  /** Start a fresh run in this grove (or Warden when none is named). */
-  function reset(difficultyId) {
+  /**
+   * Start a fresh run in this grove (or Warden when none is named). `greenhouse`
+   * is the grown upgrades' combined effects (or null for a bare run): it adds
+   * hearts to the tree, sunlight to the opening purse, and multipliers to every
+   * shot's damage and every kill's sunlight for the whole run.
+   */
+  function reset(difficultyId, greenhouse) {
     const difficulty = difficultyById(difficultyId ?? DEFAULT_DIFFICULTY);
+    const gifts = greenhouse ?? { hearts: 0, damageMul: 1, startSun: 0, sunMul: 1 };
     state.difficulty = difficulty;
     state.plants.length = 0;
     state.pests.length = 0;
@@ -175,15 +233,32 @@ export function createWorld(random) {
     state.floats.length = 0;
     state.tracers.length = 0;
     state.waveScores = [];
-    state.sun = difficulty.sun;
+    state.blockStats = [
+      { kills: 0, leaked: 0 },
+      { kills: 0, leaked: 0 },
+      { kills: 0, leaked: 0 },
+      { kills: 0, leaked: 0 },
+    ];
+    state.sun = difficulty.sun + gifts.startSun;
+    state.greenhouseDamage = gifts.damageMul;
+    state.greenhouseSun = gifts.sunMul;
+    state.moonlight = 0;
+    state.moonbeam = null;
+    state.warden.x = WARDEN_HOME.x;
+    state.warden.y = WARDEN_HOME.y;
+    state.warden.tx = WARDEN_HOME.x;
+    state.warden.ty = WARDEN_HOME.y;
+    state.warden.zapCooldown = 0;
+    state.warden.zaps = 0;
+    state.warden.zap = null;
     state.score = 0;
     state.wave = 0;
     state.waveState = 'idle';
     state.spawnQueue = [];
     state.spawnTimer = 0;
     state.waitTimer = WAVE_WAIT;
-    state.hearts = difficulty.hearts;
-    state.maxHearts = difficulty.hearts;
+    state.hearts = difficulty.hearts + gifts.hearts;
+    state.maxHearts = difficulty.hearts + gifts.hearts;
     state.kills = 0;
     state.leaked = 0;
     state.earned = 0;
@@ -197,6 +272,7 @@ export function createWorld(random) {
     state.currentCard = STARTING_CARD;
     state.draftOffer = null;
     state.blessings.length = 0;
+    state.blessingLevels = {};
     state.lastBlessing = null;
     state.flawlessGift = null;
     state.combo.count = 0;
@@ -359,11 +435,14 @@ export function createWorld(random) {
       state.combo.timer = COMBO_WINDOW;
       if (state.combo.count > state.combo.longest) state.combo.longest = state.combo.count;
       const multiplier = comboMultiplier(state.combo.count);
-      const reward = killReward(def, season(), mods().bonusSun);
+      const reward = Math.round(killReward(def, season(), mods().bonusSun) * state.greenhouseSun);
       state.sun += reward;
       state.earned += reward;
       state.score += killScore(def, multiplier);
       state.kills += 1;
+      state.blockStats[blockIndex()].kills += 1;
+      // Every kill charges the moon: a full charge is a Moonbeam waiting.
+      state.moonlight = Math.min(MOONLIGHT_MAX, state.moonlight + MOONLIGHT_PER_KILL);
       burst(pest.x, pest.y, def.body, 12, 90);
       floatText(pest.x, pest.y - pest.radius - 18, `+${reward}`, '#f2b705');
       if (multiplier > 1) {
@@ -400,7 +479,9 @@ export function createWorld(random) {
       }
     }
     if (!target) return 0;
-    const damage = plantDamage(def, plant.stage, plant.nourished, season(), blessing);
+    const damage = plantDamage(def, plant.stage, plant.nourished, season(), blessing)
+      * state.greenhouseDamage
+      * wardenAuraMul(plant, state.warden);
     plant.cooldown = 1 / def.rate;
     plant.flash = 0.12;
     // A tracer from the plant's muzzle to where the target stands: visual
@@ -545,6 +626,7 @@ export function createWorld(random) {
         state.hearts -= pest.type === 'blight' && pest.phase === 3 ? def.damage + 3 : def.damage;
         state.leaked += 1;
         state.leaksThisSeason += 1;
+        state.blockStats[blockIndex()].leaked += 1;
         // A leak spends the combo as well as a heart.
         state.combo.count = 0;
         state.combo.timer = 0;
@@ -584,6 +666,8 @@ export function createWorld(random) {
       tracer.life -= dt;
       if (tracer.life <= 0) state.tracers.splice(index, 1);
     }
+    if (state.moonbeam && state.elapsed >= state.moonbeam.until) state.moonbeam = null;
+    if (state.warden.zap && state.elapsed >= state.warden.zap.until) state.warden.zap = null;
     if (state.shake > 0) state.shake = Math.max(0, state.shake - dt);
   }
 
@@ -636,7 +720,7 @@ export function createWorld(random) {
             events |= EVENT_BLESSING;
           }
         }
-        state.draftOffer = drawOffer(random, state.blessings, state.currentCard);
+        state.draftOffer = drawOffer(random, state.blessings, state.currentCard, state.blessingLevels);
         state.draftNumber = state.wave / SEASON_LENGTH;
         state.waveState = 'draft';
         events |= EVENT_DRAFT;
@@ -648,11 +732,28 @@ export function createWorld(random) {
     return events;
   }
 
-  /** Grant a blessing the grove owes the player: Heartwood pays its hearts at once. */
+  /**
+   * Grant a blessing the grove owes the player: Heartwood pays its hearts at
+   * once. A blessing already held at level 1 deepens to level 2 instead
+   * (Heartwood pays its hearts again); only a blessing at its peak refuses,
+   * so the caller can pay sunlight instead.
+   */
   function grantBlessing(id) {
-    if (state.blessings.includes(id)) return false;
-    state.blessings.push(id);
     const blessing = blessingById(id);
+    if (!blessing) return false;
+    if (state.blessings.includes(id)) {
+      const level = state.blessingLevels[id] ?? 1;
+      if (level >= (blessing.maxLevel ?? 2)) return false;
+      state.blessingLevels[id] = 2;
+      if (id === 'heartwood') {
+        state.maxHearts += 2;
+        state.hearts = Math.min(state.maxHearts, state.hearts + 2);
+      }
+      state.lastBlessing = { ...blessing, level: 2 };
+      return true;
+    }
+    state.blessings.push(id);
+    state.blessingLevels[id] = 1;
     if (id === 'heartwood') {
       state.maxHearts += 2;
       state.hearts = Math.min(state.maxHearts, state.hearts + 2);
@@ -668,8 +769,9 @@ export function createWorld(random) {
 
   /**
    * Pick a season card: its season rules the next five waves, and its blessing
-   * joins the grove (or, when the blessing is already held, the grove pays
-   * sunlight instead). Only valid while a draft is open.
+   * joins the grove — or deepens to level 2 when already held at level 1.
+   * When the blessing is already at its peak, the grove pays sunlight
+   * instead. Only valid while a draft is open.
    */
   function applyDraft(cardId) {
     if (state.waveState !== 'draft' || !state.draftOffer) return 0;
@@ -687,7 +789,7 @@ export function createWorld(random) {
     if (!grantBlessing(card.blessing)) {
       state.sun += 75;
       state.earned += 75;
-      state.lastBlessing = { name: 'Sunlight Gift', glyph: '\u2600', blurb: 'Blessing already held: +75 sunlight instead.' };
+      state.lastBlessing = { name: 'Sunlight Gift', glyph: '\u2600', blurb: 'Blessing already at its peak: +75 sunlight instead.' };
     }
     events |= EVENT_BLESSING;
     return events;
@@ -728,13 +830,132 @@ export function createWorld(random) {
     return events;
   }
 
+  /** Whether the Moonbeam can fire right now, and why not when it cannot. */
+  function moonbeamStatus() {
+    if (state.over || state.won || state.waveState === 'draft') return { ready: false, moonlight: state.moonlight, cost: MOONBEAM_COST, reason: 'not now' };
+    if (state.moonlight < MOONBEAM_COST) return { ready: false, moonlight: state.moonlight, cost: MOONBEAM_COST, reason: 'charging' };
+    if (state.pests.length === 0) return { ready: false, moonlight: state.moonlight, cost: MOONBEAM_COST, reason: 'no pests' };
+    return { ready: true, moonlight: state.moonlight, cost: MOONBEAM_COST, reason: '' };
+  }
+
+  /**
+   * The Moonbeam hero ability: a full charge of moonlight calls a beam down
+   * on the row thickest with pests — 60 damage to every pest whose centre is
+   * in that row, and a slow on what survives. It costs the whole charge and
+   * refuses when the moon is not full or the field is empty.
+   */
+  function moonbeam() {
+    if (!moonbeamStatus().ready) return EVENT_DENIED;
+    const row = pickMoonbeamRow(state.pests);
+    if (row < 0) return EVENT_DENIED;
+    const struck = state.pests.filter((pest) => pest.hp > 0 && rowOf(pest) === row);
+    const impactX = struck.length > 0
+      ? struck.reduce((sum, pest) => sum + pest.x, 0) / struck.length
+      : BOARD.x + (BOARD.cols * BOARD.cell) / 2;
+    state.moonlight = 0;
+    state.moonbeam = {
+      row,
+      x: impactX,
+      y: BOARD.y + row * BOARD.cell + BOARD.cell / 2,
+      until: state.elapsed + MOONBEAM_BEAM_SECONDS,
+    };
+    let events = EVENT_MOONBEAM;
+    for (const pest of struck) {
+      pest.slowUntil = state.elapsed + MOONBEAM_SLOW_SECONDS;
+      pest.slowFactor = 1 - MOONBEAM_SLOW;
+      events |= damagePest(pest, MOONBEAM_DAMAGE, '#bcd8f5');
+    }
+    burst(impactX, state.moonbeam.y, '#bcd8f5', 30, 200);
+    floatText(impactX, state.moonbeam.y - 40, 'MOONBEAM!', '#bcd8f5');
+    return events;
+  }
+
+  /**
+   * Send the Warden gliding to a point on the board (clamped to the garden).
+   * The Warden hovers, so it can cross the path and the beds alike.
+   */
+  function moveWarden(x, y) {
+    const point = clampToBoard(x, y);
+    state.warden.tx = point.x;
+    state.warden.ty = point.y;
+  }
+
+  /** Whether the Warden's zap can fire right now, and why not when it cannot. */
+  function wardenStatus() {
+    if (state.over || state.won || state.waveState === 'draft') {
+      return { ready: false, cooldown: state.warden.zapCooldown, zaps: state.warden.zaps, reason: 'not now' };
+    }
+    if (state.warden.zapCooldown > 0) {
+      return { ready: false, cooldown: state.warden.zapCooldown, zaps: state.warden.zaps, reason: 'charging' };
+    }
+    if (state.pests.length === 0) {
+      return { ready: false, cooldown: 0, zaps: state.warden.zaps, reason: 'no pests' };
+    }
+    return { ready: true, cooldown: 0, zaps: state.warden.zaps, reason: '' };
+  }
+
+  /**
+   * The Warden's zap: a bolt of moonlight that strikes one pest for 30
+   * damage, through the same kill path as every other blow — so a zap that
+   * kills pays sunlight and score, feeds the combo and charges the moon.
+   * It refuses while charging, out of reach, or when the field is empty.
+   */
+  function zapPest(pest) {
+    if (!pest || pest.hp <= 0) return EVENT_DENIED;
+    if (!wardenStatus().ready) return EVENT_DENIED;
+    if (!wardenInZapRange(state.warden, pest)) return EVENT_DENIED;
+    state.warden.zapCooldown = WARDEN_ZAP_COOLDOWN;
+    state.warden.zaps += 1;
+    state.warden.zap = { x: pest.x, y: pest.y, until: state.elapsed + WARDEN_BOLT_SECONDS };
+    burst(pest.x, pest.y, '#ffe066', 8, 80);
+    return EVENT_WARDEN_ZAP | damagePest(pest, WARDEN_ZAP_DAMAGE, '#ffe066');
+  }
+
+  /** Zap the pest under a click, if one is there and in reach. */
+  function zapAt(x, y) {
+    const target = wardenZapTarget(state.pests, x, y);
+    if (!target) return EVENT_DENIED;
+    return zapPest(target);
+  }
+
+  /**
+   * Glide the Warden toward its target and let the zap recharge. Called
+   * every step, in play and on the title — on the title the Warden simply
+   * idles at home, target and position already the same.
+   */
+  function stepWarden(dt) {
+    const warden = state.warden;
+    if (warden.zapCooldown > 0) warden.zapCooldown = Math.max(0, warden.zapCooldown - dt);
+    const dx = warden.tx - warden.x;
+    const dy = warden.ty - warden.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance <= 0) return;
+    const stride = WARDEN_SPEED * dt;
+    if (distance <= stride) {
+      warden.x = warden.tx;
+      warden.y = warden.ty;
+    } else {
+      warden.x += (dx / distance) * stride;
+      warden.y += (dy / distance) * stride;
+    }
+  }
+
+  /**
+   * Restart the random stream from a seed, so a run can be replayed exactly:
+   * the same seed deals the same drafts, the same flawless gifts, the same
+   * wobble. The caller resets the world after reseeding.
+   */
+  function reseed(seedValue) {
+    random = createRandom(seedValue);
+  }
+
   /** Redraw the draft's three cards for 25 sunlight, while a draft is open. */
   function rerollDraft() {
     if (state.waveState !== 'draft' || !state.draftOffer) return EVENT_DENIED;
     if (state.sun < REROLL_COST) return EVENT_DENIED;
     state.sun -= REROLL_COST;
     state.rerolls += 1;
-    state.draftOffer = drawOffer(random, state.blessings, state.currentCard);
+    state.draftOffer = drawOffer(random, state.blessings, state.currentCard, state.blessingLevels);
     return EVENT_REROLL;
   }
 
@@ -742,6 +963,7 @@ export function createWorld(random) {
     let events = 0;
     state.elapsed += dt;
     if (state.sunburstCooldown > 0) state.sunburstCooldown = Math.max(0, state.sunburstCooldown - dt);
+    stepWarden(dt);
     // The combo spends itself after three quiet seconds.
     if (state.combo.timer > 0) {
       state.combo.timer -= dt;
@@ -826,6 +1048,13 @@ export function createWorld(random) {
     applyDraft,
     sunburst,
     sunburstStatus,
+    moonbeam,
+    moonbeamStatus,
+    moveWarden,
+    zapPest,
+    zapAt,
+    wardenStatus,
+    reseed,
     rerollDraft,
     preview: () => wavePreview(state.wave + 1),
     /** The three waves after the next one, for the panel's forecast line. */

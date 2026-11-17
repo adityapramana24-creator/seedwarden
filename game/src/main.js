@@ -1,7 +1,7 @@
 // Boot and the one loop: input is read every frame, the world advances in fixed
 // 1/60 s steps (twice as many at 2x speed), and the renderer paints what is
-// there. The game moves between seven screens: title, how to play, play,
-// paused, draft, victory and defeat.
+// there. The game moves between eight screens: title, how to play, play,
+// paused, draft, victory, defeat, and the greenhouse.
 //
 // ?seed=N fixes the random pattern. ?shot=start|play|draft|victory|defeat
 // (with &seed=N) stages that scene instead of running the loop, paints it
@@ -10,16 +10,18 @@ import { BOARD, STEP } from './config.js';
 import { createRandom } from './random.js';
 import {
   EVENT_BLESSING, EVENT_BOSS_PHASE, EVENT_CHAMPION, EVENT_DENIED, EVENT_DRAFT, EVENT_GROW,
-  EVENT_HARVEST, EVENT_KILL, EVENT_LEAK, EVENT_NOURISH, EVENT_OVER, EVENT_PLANT, EVENT_REROLL,
-  EVENT_SELL, EVENT_SHOOT, EVENT_SUNBURST, EVENT_WAVE_CLEAR, EVENT_WAVE_START, EVENT_WIN, createWorld,
+  EVENT_HARVEST, EVENT_KILL, EVENT_LEAK, EVENT_MOONBEAM, EVENT_NOURISH, EVENT_OVER, EVENT_PLANT, EVENT_REROLL,
+  EVENT_SELL, EVENT_SHOOT, EVENT_SUNBURST, EVENT_WARDEN_ZAP, EVENT_WAVE_CLEAR, EVENT_WAVE_START, EVENT_WIN, createWorld,
 } from './world.js';
-import { KEY_CONFIRM, KEY_ESCAPE, KEY_MUTE, KEY_PAUSE, KEY_REROLL, KEY_SPEED, KEY_SUNBURST, createInput } from './input.js';
+import { WARDEN_AURA_RADIUS, wardenZapTarget } from './warden.js';
+import { KEY_CONFIRM, KEY_ESCAPE, KEY_GREENHOUSE, KEY_MOONBEAM, KEY_MUTE, KEY_PAUSE, KEY_REROLL, KEY_SPEED, KEY_SUNBURST, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import {
-  LAYOUT, SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_HOWTO, SCREEN_PAUSED, SCREEN_PLAY,
+  LAYOUT, SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_GREENHOUSE, SCREEN_HOWTO, SCREEN_PAUSED, SCREEN_PLAY,
   SCREEN_TITLE, SCREEN_VICTORY, createRenderer, inside,
 } from './render.js';
-import { readRecords, recordGame } from './records.js';
+import { readRecords, recordGame, spendSeeds } from './records.js';
+import { UPGRADES, greenhouseEffects, growUpgrade, writeGreenhouse } from './greenhouse.js';
 import { stageShot } from './shots.js';
 import { blightPhaseRules } from './pests.js';
 import { DEFAULT_DIFFICULTY, DIFFICULTIES } from './difficulty.js';
@@ -66,6 +68,17 @@ function runShot(name) {
     floats: world.state.floats.length,
     tracers: world.state.tracers.length,
     waveScores: [...world.state.waveScores],
+    moonlight: world.state.moonlight,
+    moonbeamActive: world.state.moonbeam !== null,
+    banner: scene.banner?.title ?? null,
+    wardenX: Math.round(world.state.warden.x),
+    wardenY: Math.round(world.state.warden.y),
+    wardenZaps: world.state.warden.zaps,
+    wardenZapFired: world.state.warden.zaps > 0,
+    wardenNearBlight: blight
+      ? Math.hypot(world.state.warden.x - blight.x, world.state.warden.y - blight.y) <= WARDEN_AURA_RADIUS
+      : false,
+    blockStats: world.state.blockStats.map((block) => ({ kills: block.kills, leaked: block.leaked })),
   };
   const ui = {
     hover: { x: -1, y: -1, inside: false },
@@ -73,10 +86,11 @@ function runShot(name) {
     selectedPlant: null,
     speed: 1,
     muted: false,
-    banner: null,
+    banner: scene.banner ?? null,
     difficulty: world.state.difficulty.id,
     seed,
     sunburst: world.sunburstStatus(),
+    moonbeam: world.moonbeamStatus(),
     preview: world.preview(),
     forecast: world.forecast(),
     pestsLeft: world.pestsLeft(),
@@ -104,6 +118,10 @@ function runGame() {
   let accumulator = 0;
   let last = performance.now();
   let ambientTimer = 0;
+  // The seed of the run being played: the one the page opened with (?seed=N,
+  // or one drawn at load) for the first run, a fresh one for every run after.
+  let runSeed = seed;
+  let runStarted = false;
 
   const ui = {
     selectedCard: -1,
@@ -111,12 +129,17 @@ function runGame() {
     speed: 1,
     banner: null,
     difficulty: DEFAULT_DIFFICULTY,
-    seed,
+    get seed() {
+      return runSeed;
+    },
     get muted() {
       return audio.muted();
     },
     get sunburst() {
       return world.sunburstStatus();
+    },
+    get moonbeam() {
+      return world.moonbeamStatus();
     },
     get hover() {
       return input.hover();
@@ -156,14 +179,33 @@ function runGame() {
     ui.banner = { title, sub: sub ?? null, until: world.state.elapsed + seconds };
   }
 
-  function startGame() {
-    world.reset(ui.difficulty);
+  /** Reset the world and start playing; the seed is the caller's business. */
+  function beginRun() {
+    world.reset(ui.difficulty, greenhouseEffects(records.greenhouse));
     ui.selectedCard = -1;
     ui.selectedPlant = null;
     ui.banner = null;
     accumulator = 0;
     screen = SCREEN_PLAY;
     announce('Playing. Plant your first tower, then start wave 1.');
+  }
+
+  function startGame() {
+    // The first run on the page uses the seed it opened with; every run
+    // after it is a new year on a fresh seed, so the seed on the end screen
+    // is always the seed of the run just played.
+    if (runStarted) {
+      runSeed = Math.floor(Math.random() * 4294967296);
+      world.reseed(runSeed);
+    }
+    runStarted = true;
+    beginRun();
+  }
+
+  /** The same seed again: the exact same pests, drafts and gifts. */
+  function replaySeed() {
+    world.reseed(runSeed);
+    beginRun();
   }
 
   function endGame(victory) {
@@ -216,6 +258,12 @@ function runGame() {
       audio.sunburst();
       showBanner('SUNBURST!', 'Noon light falls on every pest.', 1.6);
     }
+    if (events & EVENT_MOONBEAM) {
+      audio.moonbeam();
+      showBanner('MOONBEAM!', 'The moon answers the grove.', 1.6);
+    }
+    // No banner for the zap: the bolt and the damage number carry it.
+    if (events & EVENT_WARDEN_ZAP) audio.zap();
     if (events & EVENT_BOSS_PHASE) {
       audio.bossPhase();
       const blight = world.state.pests.find((pest) => pest.type === 'blight');
@@ -269,6 +317,16 @@ function runGame() {
       audio.click();
       return;
     }
+    // A pest under the cursor is zapped, even with a card picked: the pest
+    // is on the path, where planting would be denied anyway, and the card
+    // stays picked for the next click. A pest can never sit under a grass
+    // cell's centre, so the zap can never steal a plant click.
+    if (wardenZapTarget(world.state.pests, x, y)) {
+      const events = world.zapAt(x, y);
+      if (events & EVENT_WARDEN_ZAP) playEvents(events);
+      else audio.denied();
+      return;
+    }
     if (ui.selectedCard >= 0) {
       const kinds = ['thorn', 'frost', 'sunspore', 'bramble', 'vine', 'spore'];
       const events = world.plant(kinds[ui.selectedCard], cell.col, cell.row);
@@ -276,6 +334,9 @@ function runGame() {
       else audio.denied();
       return;
     }
+    // An empty click moves the Warden: the wisp glides to the clicked cell
+    // and the selected tower is put away.
+    world.moveWarden(x, y);
     ui.selectedPlant = null;
   }
 
@@ -297,6 +358,12 @@ function runGame() {
     if (inside(LAYOUT.sunburstButton, x, y)) {
       const events = world.sunburst();
       if (events & EVENT_SUNBURST) playEvents(events);
+      else audio.denied();
+      return;
+    }
+    if (inside(LAYOUT.moonbeamButton, x, y)) {
+      const events = world.moonbeam();
+      if (events & EVENT_MOONBEAM) playEvents(events);
       else audio.denied();
       return;
     }
@@ -344,6 +411,11 @@ function runGame() {
       } else if (inside(LAYOUT.titleHow, x, y)) {
         audio.click();
         screen = SCREEN_HOWTO;
+      } else if (inside(LAYOUT.titleGreenhouse, x, y)) {
+        audio.click();
+        records = readRecords();
+        screen = SCREEN_GREENHOUSE;
+        announce('The Greenhouse. Spend banked seeds on permanent upgrades.');
       } else {
         for (let index = 0; index < LAYOUT.titleDifficulties.length; index += 1) {
           if (inside(LAYOUT.titleDifficulties[index], x, y)) {
@@ -358,6 +430,29 @@ function runGame() {
     }
     if (screen === SCREEN_HOWTO) {
       if (inside(LAYOUT.howBack, x, y)) {
+        audio.click();
+        screen = SCREEN_TITLE;
+      }
+      return;
+    }
+    if (screen === SCREEN_GREENHOUSE) {
+      for (let index = 0; index < LAYOUT.greenhouseCards.length; index += 1) {
+        if (inside(LAYOUT.greenhouseCards[index], x, y)) {
+          const upgrade = UPGRADES[index];
+          const result = growUpgrade(records.greenhouse ?? [], upgrade.id, records.seeds ?? 0);
+          if (result.ok) {
+            writeGreenhouse(result.grown);
+            spendSeeds((records.seeds ?? 0) - result.seeds);
+            records = readRecords();
+            audio.greenhouse();
+            announce(`${upgrade.name} grown. ${records.seeds} seeds left.`);
+          } else {
+            audio.denied();
+          }
+          return;
+        }
+      }
+      if (inside(LAYOUT.greenhouseBack, x, y)) {
         audio.click();
         screen = SCREEN_TITLE;
       }
@@ -419,16 +514,35 @@ function runGame() {
   function handleKeys() {
     const keys = input.takeKeys();
     const cardKey = input.takeCardKey();
-    if (keys & (KEY_CONFIRM | KEY_PAUSE | KEY_SPEED | KEY_MUTE | KEY_ESCAPE | KEY_SUNBURST | KEY_REROLL)) audio.unlock();
+    if (keys & (KEY_CONFIRM | KEY_PAUSE | KEY_SPEED | KEY_MUTE | KEY_ESCAPE | KEY_SUNBURST | KEY_REROLL | KEY_MOONBEAM | KEY_GREENHOUSE)) audio.unlock();
     if (keys & KEY_SUNBURST && screen === SCREEN_PLAY) {
       const events = world.sunburst();
       if (events & EVENT_SUNBURST) playEvents(events);
       else if (events & EVENT_DENIED) audio.denied();
     }
+    if (keys & KEY_MOONBEAM && screen === SCREEN_PLAY) {
+      const events = world.moonbeam();
+      if (events & EVENT_MOONBEAM) playEvents(events);
+      else if (events & EVENT_DENIED) audio.denied();
+    }
+    if (keys & KEY_GREENHOUSE) {
+      if (screen === SCREEN_TITLE || screen === SCREEN_VICTORY || screen === SCREEN_DEFEAT) {
+        records = readRecords();
+        screen = SCREEN_GREENHOUSE;
+        announce('The Greenhouse. Spend banked seeds on permanent upgrades.');
+      } else if (screen === SCREEN_GREENHOUSE) {
+        screen = SCREEN_TITLE;
+      }
+    }
     if (keys & KEY_REROLL && screen === SCREEN_DRAFT) {
       const events = world.rerollDraft();
       if (events & EVENT_REROLL) audio.reroll();
       else audio.denied();
+    }
+    // R on an end screen replays the run that just ended, seed and all.
+    if (keys & KEY_REROLL && (screen === SCREEN_VICTORY || screen === SCREEN_DEFEAT)) {
+      audio.click();
+      replaySeed();
     }
     if (cardKey >= 0 && screen === SCREEN_PLAY) {
       ui.selectedCard = ui.selectedCard === cardKey ? -1 : cardKey;
@@ -445,6 +559,7 @@ function runGame() {
     }
     if (keys & KEY_ESCAPE) {
       if (screen === SCREEN_HOWTO) screen = SCREEN_TITLE;
+      else if (screen === SCREEN_GREENHOUSE) screen = SCREEN_TITLE;
       else if (screen === SCREEN_PLAY) {
         ui.selectedCard = -1;
         ui.selectedPlant = null;
@@ -462,6 +577,7 @@ function runGame() {
     if (keys & KEY_CONFIRM) {
       if (screen === SCREEN_TITLE) startGame();
       else if (screen === SCREEN_HOWTO) screen = SCREEN_TITLE;
+      else if (screen === SCREEN_GREENHOUSE) screen = SCREEN_TITLE;
       else if (screen === SCREEN_PAUSED) screen = SCREEN_PLAY;
       else if (screen === SCREEN_VICTORY || screen === SCREEN_DEFEAT) startGame();
       else if (screen === SCREEN_PLAY) {
@@ -472,7 +588,7 @@ function runGame() {
   }
 
   function step() {
-    if (screen === SCREEN_TITLE || screen === SCREEN_HOWTO) {
+    if (screen === SCREEN_TITLE || screen === SCREEN_HOWTO || screen === SCREEN_GREENHOUSE) {
       ambientTimer -= STEP;
       if (ambientTimer <= 0) {
         ambientTimer += AMBIENT_SECONDS;
@@ -495,8 +611,8 @@ function runGame() {
     last = now;
     for (const click of input.takeClicks()) handleClick(click.x, click.y);
     handleKeys();
-    if (screen === SCREEN_TITLE || screen === SCREEN_HOWTO || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_HOWTO || screen === SCREEN_PLAY)) {
+    if (screen === SCREEN_TITLE || screen === SCREEN_HOWTO || screen === SCREEN_GREENHOUSE || screen === SCREEN_PLAY) {
+      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_HOWTO || screen === SCREEN_GREENHOUSE || screen === SCREEN_PLAY)) {
         step();
         accumulator -= STEP;
       }
@@ -519,7 +635,7 @@ function runGame() {
     world,
     screen: () => screen,
     records: () => records,
-    ui: () => ({ selectedCard: ui.selectedCard, speed: ui.speed, difficulty: ui.difficulty }),
+    ui: () => ({ selectedCard: ui.selectedCard, speed: ui.speed, difficulty: ui.difficulty, seed: ui.seed }),
   };
 
   world.demoGarden();

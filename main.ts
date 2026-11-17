@@ -16,6 +16,8 @@
 // localStorage (game/src/records.js).
 // v3: the Blight fights in three phases, the warden answers with a Sunburst (Q), and three groves, two champions and five feats join the draft (game/src/difficulty.js, game/src/feats.js).
 // v4: the grove is the Moonlit Grove — a midnight garden of bioluminescent plants under a full moon, Gloomcap walks wave 5 as the third champion, and the panel forecasts the next three waves (game/src/render.js, game/src/waves.js).
+// v5: the Moonbeam answers kills with moonlight (W), the Greenhouse spends banked seeds on nine permanent upgrades (G), the four seasons are named groves, and the title shows the year's twenty-wave path (game/src/moonbeam.js, game/src/greenhouse.js).
+// v6: the Warden is yours to move — a guardian wisp whose aura strengthens nearby plants and whose zap strikes one pest (game/src/warden.js); blessings deepen to level 2, and the victory panel grades each five-wave grove block.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -149,6 +149,27 @@ export function createAudio() {
         tone(context, master, 2093, 0.5, 'sine', 0.18, now + 0.08);
       });
     },
+    moonbeam() {
+      // Moonlight, all at once: a high shimmer that falls like light.
+      play((now) => {
+        tone(context, master, 1568, 0.4, 'sine', 0.22, now, 784);
+        tone(context, master, 2093, 0.5, 'sine', 0.15, now + 0.06, 1047);
+      });
+    },
+    zap() {
+      // A crackle of gold light: a bright note that snaps downward.
+      play((now) => {
+        tone(context, master, 1568, 0.09, 'square', 0.12, now, 523);
+        tone(context, master, 2093, 0.06, 'triangle', 0.15, now, 1047);
+      });
+    },
+    greenhouse() {
+      // Something takes root: a low note, then a warm fifth above it.
+      play((now) => {
+        tone(context, master, 330, 0.2, 'triangle', 0.25, now);
+        tone(context, master, 494, 0.3, 'triangle', 0.25, now + 0.12);
+      });
+    },
     bossPhase() {
       // The Blight turns: a low snarl that climbs into a snarl.
       play((now) => {

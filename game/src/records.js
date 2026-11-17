@@ -5,6 +5,7 @@
 // simply lasts the visit.
 
 import { BEST_KEY, FEATS_KEY, FURTHEST_KEY, SAVED_KEY, SEEDS_KEY } from './config.js';
+import { readGreenhouse } from './greenhouse.js';
 
 function read(key) {
   try {
@@ -30,10 +31,10 @@ function write(key, value) {
   }
 }
 
-/** The career record as it stands: best score, furthest wave, groves saved, feats ever earned, seeds banked. */
+/** The career record as it stands: best score, furthest wave, groves saved, feats ever earned, seeds banked, Greenhouse upgrades grown. */
 export function readRecords() {
   const feats = readText(FEATS_KEY).split(',').map((id) => id.trim()).filter(Boolean);
-  return { best: read(BEST_KEY), furthest: read(FURTHEST_KEY), saved: read(SAVED_KEY), feats, seeds: read(SEEDS_KEY) };
+  return { best: read(BEST_KEY), furthest: read(FURTHEST_KEY), saved: read(SAVED_KEY), feats, seeds: read(SEEDS_KEY), greenhouse: readGreenhouse() };
 }
 
 /**
@@ -74,4 +75,15 @@ export function recordGame({ score, wave, won, feats = [] }) {
     write(FEATS_KEY, records.feats.join(','));
   }
   return { ...records, newBest, seedsBanked };
+}
+
+/**
+ * Spend banked seeds (the Greenhouse's purchases): the bank drops by this
+ * much, never below zero. Returns the bank as it stands now.
+ */
+export function spendSeeds(amount) {
+  const records = readRecords();
+  records.seeds = Math.max(0, records.seeds - amount);
+  write(SEEDS_KEY, records.seeds);
+  return records.seeds;
 }

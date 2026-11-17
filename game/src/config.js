@@ -117,3 +117,5 @@ export const SAVED_KEY = 'seedwarden.saved';
 export const FEATS_KEY = 'seedwarden.feats';
 /** Where the seed bank is kept between visits: seeds earned by winning years, one per feat earned that run. */
 export const SEEDS_KEY = 'seedwarden.seeds';
+/** Where the Greenhouse's grown upgrades are kept between visits, as one comma-separated line of upgrade ids. */
+export const GREENHOUSE_KEY = 'seedwarden.greenhouse';

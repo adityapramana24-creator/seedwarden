@@ -24,6 +24,20 @@ export const GRADE_COLORS = {
 };
 
 /**
+ * One five-wave block's grade, from the leaks it cost: a clean block is S,
+ * one leak A, two B, three or four C, five or more D. Leaks are the only
+ * failure a tower defence measures — kills are forced by the waves, so
+ * the grade says how well the grove held, not how busy it looked.
+ */
+export function blockGrade(leaked) {
+  if (leaked <= 0) return 'S';
+  if (leaked === 1) return 'A';
+  if (leaked === 2) return 'B';
+  if (leaked <= 4) return 'C';
+  return 'D';
+}
+
+/**
  * The run's grade so far, from hearts kept (up to 80), a clean record (up to
  * 20), the longest combo (up to 32) and the waves cleared (up to 20): 152 at
  * most. S needs 130 — a run that kept every heart, leaked nothing and chained

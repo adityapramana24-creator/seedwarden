@@ -16,15 +16,18 @@
 // the end screens each show a full panel of the game's systems. Every number
 // on screen is a live value from the world — nothing here is decoration.
 
-import { BOARD, CARDS, FIELD, FONT, HUD, PALETTE, PANEL, TREE_CELL, WAVES_PER_YEAR, cellCentre, isPathCell } from './config.js';
+import { BOARD, CARDS, FIELD, FONT, HUD, PALETTE, PANEL, TREE_CELL, WAVES_PER_YEAR, WAYPOINTS, cellCentre, isPathCell } from './config.js';
 import { GROWTH_SECONDS, PLANTS, STAGE_NAMES, nourishCost, plantDamage, plantHarvest, plantRange, sellValue } from './plants.js';
 import { PESTS, blightPhaseRules, isChampion } from './pests.js';
-import { wavesLeftInSeason } from './seasons.js';
+import { groveFor, wavesLeftInSeason } from './seasons.js';
 import { blessingById, blessingMods } from './blessings.js';
-import { GRADE_COLORS, comboMultiplier, gradeFor } from './combo.js';
+import { GRADE_COLORS, blockGrade, comboMultiplier, gradeFor } from './combo.js';
 import { DIFFICULTIES } from './difficulty.js';
 import { FEATS, featsFor, nextGoal } from './feats.js';
 import { REROLL_COST, SUNBURST_COOLDOWN } from './world.js';
+import { MOONBEAM_BEAM_SECONDS, MOONLIGHT_MAX } from './moonbeam.js';
+import { TRACKS, UPGRADES, canGrow } from './greenhouse.js';
+import { WARDEN_AURA_DAMAGE, WARDEN_AURA_RADIUS, WARDEN_BOLT_SECONDS, WARDEN_ZAP_COOLDOWN, WARDEN_ZAP_RANGE, wardenAuraMul } from './warden.js';
 import { FIREFLY_COUNT, MOON, blightLook, fireflyAt, stableHash as cellHash } from './night.js';
 
 export const SCREEN_TITLE = 'title';
@@ -34,6 +37,7 @@ export const SCREEN_PAUSED = 'paused';
 export const SCREEN_DRAFT = 'draft';
 export const SCREEN_VICTORY = 'victory';
 export const SCREEN_DEFEAT = 'defeat';
+export const SCREEN_GREENHOUSE = 'greenhouse';
 
 const CARD_WIDTH = 134;
 const CARD_STEP = 142;
@@ -46,14 +50,16 @@ export const LAYOUT = {
     h: CARDS.height - 8,
   })),
   startButton: { x: PANEL.x + 16, y: 264, w: PANEL.width - 32, h: 52 },
-  sunburstButton: { x: PANEL.x + 16, y: 322, w: PANEL.width - 32, h: 44 },
+  sunburstButton: { x: PANEL.x + 16, y: 322, w: 184, h: 44 },
+  moonbeamButton: { x: PANEL.x + 208, y: 322, w: 184, h: 44 },
   speedButton: { x: PANEL.x + 16, y: 608, w: 120, h: 40 },
   pauseButton: { x: PANEL.x + 144, y: 608, w: 120, h: 40 },
   muteButton: { x: PANEL.x + 272, y: 608, w: 120, h: 40 },
   nourishButton: { x: PANEL.x + 16, y: 492, w: 184, h: 30 },
   sellButton: { x: PANEL.x + 208, y: 492, w: 184, h: 30 },
   titlePlay: { x: 490, y: 508, w: 300, h: 56 },
-  titleHow: { x: 490, y: 574, w: 300, h: 44 },
+  titleHow: { x: 340, y: 574, w: 300, h: 44 },
+  titleGreenhouse: { x: 640, y: 574, w: 300, h: 44 },
   titleDifficulties: DIFFICULTIES.map((_, index) => ({
     x: 744, y: 256 + index * 48, w: 422, h: 44,
   })),
@@ -64,11 +70,18 @@ export const LAYOUT = {
     { x: 810, y: 180, w: 300, h: 380 },
   ],
   draftReroll: { x: 540, y: 572, w: 200, h: 40 },
-  victoryAgain: { x: 280, y: 540, w: 230, h: 52 },
-  victoryEndless: { x: 525, y: 540, w: 230, h: 52 },
-  victoryTitle: { x: 770, y: 540, w: 230, h: 52 },
+  victoryAgain: { x: 280, y: 552, w: 230, h: 52 },
+  victoryEndless: { x: 525, y: 552, w: 230, h: 52 },
+  victoryTitle: { x: 770, y: 552, w: 230, h: 52 },
   defeatAgain: { x: 392, y: 540, w: 230, h: 52 },
   defeatTitle: { x: 637, y: 540, w: 230, h: 52 },
+  greenhouseCards: UPGRADES.map((_, index) => ({
+    x: 264 + Math.floor(index / 3) * 256,
+    y: 254 + (index % 3) * 106,
+    w: 240,
+    h: 96,
+  })),
+  greenhouseBack: { x: 490, y: 600, w: 300, h: 32 },
 };
 
 export function inside(rect, x, y) {
@@ -89,9 +102,17 @@ function formatTime(seconds) {
   return `${minutes}:${String(rest).padStart(2, '0')}`;
 }
 
+/** The Greenhouse's three tracks as pip strings — ♥●○○ ✦●○○ ☀●○○ — one pip per tier, filled when grown. */
+function greenhousePips(records) {
+  const grown = records?.greenhouse ?? [];
+  return TRACKS.map((track) => {
+    const count = UPGRADES.filter((upgrade) => upgrade.track === track.id && grown.includes(upgrade.id)).length;
+    return `${track.glyph}${'\u25CF'.repeat(count)}${'\u25CB'.repeat(3 - count)}`;
+  }).join(' ');
+}
+
 /** A season's main rule, in words: the one line the cover's season strip shows. */
-function seasonEffectLine(season) {
-  if (season.damage !== 1) {
+function seasonEffectLine(season) {  if (season.damage !== 1) {
     return season.damage > 1
       ? `plants deal +${Math.round((season.damage - 1) * 100)}% damage`
       : `plants deal ${Math.round((1 - season.damage) * 100)}% less damage`;
@@ -188,85 +209,148 @@ export function createRenderer(canvas) {
   }
 
   function drawBoard(state, season, elapsed) {
+    // One continuous night ground, not a checkerboard: a single dark bed with
+    // soft organic patches that spill across where the cell borders used to
+    // be, so the garden reads as a place, not a board game. The geometry
+    // underneath is unchanged — planting and pathing still use the same cells.
+    context.fillStyle = PALETTE.board;
+    context.fillRect(BOARD.x, BOARD.y, BOARD.cols * BOARD.cell, BOARD.rows * BOARD.cell);
     for (let row = 0; row < BOARD.rows; row += 1) {
       for (let col = 0; col < BOARD.cols; col += 1) {
+        const patchRoll = cellHash(col, row, 13);
+        if (patchRoll <= 0.4) continue;
+        const px = BOARD.x + col * BOARD.cell + cellHash(col, row, 14) * BOARD.cell;
+        const py = BOARD.y + row * BOARD.cell + cellHash(col, row, 15) * BOARD.cell;
+        context.fillStyle = patchRoll > 0.7 ? 'rgba(30, 58, 74, 0.5)' : 'rgba(18, 38, 54, 0.5)';
+        context.beginPath();
+        context.ellipse(
+          px, py,
+          26 + cellHash(col, row, 16) * 22,
+          18 + cellHash(col, row, 17) * 16,
+          cellHash(col, row, 18) * Math.PI, 0, Math.PI * 2,
+        );
+        context.fill();
+      }
+    }
+    // The path as one smooth road, stroked along the waypoints with round
+    // joins: a moonlit edge first, then the soil, then the worn centre line.
+    const tracePath = () => {
+      context.beginPath();
+      WAYPOINTS.forEach((point, index) => {
+        if (index === 0) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      });
+    };
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.strokeStyle = 'rgba(150, 190, 255, 0.22)';
+    context.lineWidth = BOARD.cell + 6;
+    tracePath();
+    context.stroke();
+    context.strokeStyle = PALETTE.soil;
+    context.lineWidth = BOARD.cell;
+    tracePath();
+    context.stroke();
+    context.strokeStyle = PALETTE.roadLight;
+    context.globalAlpha = 0.35;
+    context.lineWidth = 20;
+    tracePath();
+    context.stroke();
+    context.globalAlpha = 1;
+    // Pebbles and wear along the road, deterministic per path cell.
+    for (let row = 0; row < BOARD.rows; row += 1) {
+      for (let col = 0; col < BOARD.cols; col += 1) {
+        if (!isPathCell(col, row)) continue;
         const x = BOARD.x + col * BOARD.cell;
         const y = BOARD.y + row * BOARD.cell;
-        if (isPathCell(col, row)) {
-          // A moonlit road, not a soil checker: cool slate with a worn
-          // centre, wheel ruts along the direction the path runs, pebbles,
-          // and edges that catch the moonlight where the road meets grass.
-          context.fillStyle = PALETTE.soil;
-          context.fillRect(x, y, BOARD.cell, BOARD.cell);
-          const horizontal = isPathCell(col - 1, row) || isPathCell(col + 1, row);
-          const vertical = isPathCell(col, row - 1) || isPathCell(col, row + 1);
-          context.fillStyle = PALETTE.roadLight;
-          context.globalAlpha = 0.35;
-          if (horizontal && !vertical) {
-            context.fillRect(x, y + 26, BOARD.cell, 20);
-          } else if (vertical && !horizontal) {
-            context.fillRect(x + 26, y, 20, BOARD.cell);
-          } else {
-            context.beginPath();
-            context.arc(x + 36, y + 36, 20, 0, Math.PI * 2);
-            context.fill();
-          }
+        context.fillStyle = PALETTE.soilEdge;
+        context.globalAlpha = 0.5;
+        if (cellHash(col, row, 1) > 0.5) context.fillRect(x + 10, y + 14, 12, 8);
+        if (cellHash(col, row, 2) > 0.5) context.fillRect(x + 44, y + 46, 14, 9);
+        if (cellHash(col, row, 3) > 0.6) context.fillRect(x + 30, y + 30, 8, 6);
+        context.globalAlpha = 1;
+      }
+    }
+    // The grove is alive at night: deterministic glow-flowers and grass tufts
+    // on the grass cells, the same on every visit to the same cell.
+    for (let row = 0; row < BOARD.rows; row += 1) {
+      for (let col = 0; col < BOARD.cols; col += 1) {
+        if (isPathCell(col, row)) continue;
+        const x = BOARD.x + col * BOARD.cell;
+        const y = BOARD.y + row * BOARD.cell;
+        const flowerRoll = cellHash(col, row, 7);
+        if (flowerRoll > 0.55) {
+          const fx = x + 14 + cellHash(col, row, 8) * 44;
+          const fy = y + 14 + cellHash(col, row, 9) * 44;
+          const petal = flowerRoll > 0.85 ? '#f9a8d4' : flowerRoll > 0.7 ? '#fde68a' : '#dbeafe';
+          context.globalAlpha = 0.28;
+          circle(fx, fy, 7, petal);
           context.globalAlpha = 1;
-          context.fillStyle = PALETTE.soilEdge;
-          context.globalAlpha = 0.5;
-          if (horizontal && !vertical) {
-            context.fillRect(x, y + 18, BOARD.cell, 3);
-            context.fillRect(x, y + 51, BOARD.cell, 3);
-          } else if (vertical && !horizontal) {
-            context.fillRect(x + 18, y, 3, BOARD.cell);
-            context.fillRect(x + 51, y, 3, BOARD.cell);
-          }
+          circle(fx, fy, 3.5, petal);
+          circle(fx, fy, 1.5, '#f2b705');
+        }
+        if (cellHash(col, row, 10) > 0.5) {
+          const tx = x + 12 + cellHash(col, row, 11) * 48;
+          const ty = y + 40 + cellHash(col, row, 12) * 20;
+          context.strokeStyle = 'rgba(120, 180, 140, 0.28)';
+          context.lineWidth = 2;
+          context.beginPath();
+          context.moveTo(tx - 4, ty + 6);
+          context.lineTo(tx - 5, ty - 2);
+          context.moveTo(tx, ty + 6);
+          context.lineTo(tx, ty - 4);
+          context.moveTo(tx + 4, ty + 6);
+          context.lineTo(tx + 5, ty - 2);
+          context.stroke();
+        }
+        context.fillStyle = 'rgba(160, 190, 230, 0.08)';
+        if (cellHash(col, row, 4) > 0.6) {
+          context.beginPath();
+          context.arc(x + 18 + cellHash(col, row, 5) * 36, y + 18 + cellHash(col, row, 6) * 36, 4, 0, Math.PI * 2);
+          context.fill();
+        }
+      }
+    }
+    // The grove's own weather on the ground, so the draft's consequence
+    // reads from the board itself, not just the tint: mist drifts over
+    // Dewmere Fen, embers glow in the Ember Orchard, leaves fall in Amber
+    // Hollow, snow dusts Frosthollow. Deterministic per cell, like the
+    // flowers above — the same grove always wears the same ground.
+    for (let row = 0; row < BOARD.rows; row += 1) {
+      for (let col = 0; col < BOARD.cols; col += 1) {
+        if (isPathCell(col, row)) continue;
+        const x = BOARD.x + col * BOARD.cell;
+        const y = BOARD.y + row * BOARD.cell;
+        const roll = cellHash(col, row, 31);
+        if (roll <= 0.55) continue;
+        if (season.grove === 'Dewmere Fen') {
+          context.fillStyle = 'rgba(190, 215, 235, 0.10)';
+          context.beginPath();
+          context.ellipse(
+            x + 16 + cellHash(col, row, 32) * 40,
+            y + 20 + cellHash(col, row, 33) * 32,
+            22 + cellHash(col, row, 34) * 14, 7 + cellHash(col, row, 35) * 5, 0, 0, Math.PI * 2,
+          );
+          context.fill();
+        } else if (season.grove === 'Ember Orchard') {
+          const ex = x + 14 + cellHash(col, row, 32) * 44;
+          const ey = y + 14 + cellHash(col, row, 33) * 44;
+          context.globalAlpha = 0.3;
+          circle(ex, ey, 7, '#ff9a3c');
+          context.globalAlpha = 0.6;
+          circle(ex, ey, 3, '#ffb35c');
+          circle(ex + 12, ey + 9, 2, '#ff9a3c');
           context.globalAlpha = 1;
-          if (cellHash(col, row, 1) > 0.5) context.fillRect(x + 10, y + 14, 12, 8);
-          if (cellHash(col, row, 2) > 0.5) context.fillRect(x + 44, y + 46, 14, 9);
-          if (cellHash(col, row, 3) > 0.6) context.fillRect(x + 30, y + 30, 8, 6);
-          // Moonlit edges: a silver-blue line where the road meets the grass.
-          context.fillStyle = 'rgba(150, 190, 255, 0.5)';
-          if (!isPathCell(col, row - 1)) context.fillRect(x, y, BOARD.cell, 2);
-          if (!isPathCell(col, row + 1)) context.fillRect(x, y + BOARD.cell - 2, BOARD.cell, 2);
-          if (!isPathCell(col - 1, row)) context.fillRect(x, y, 2, BOARD.cell);
-          if (!isPathCell(col + 1, row)) context.fillRect(x + BOARD.cell - 2, y, 2, BOARD.cell);
-        } else {
-          context.fillStyle = (col + row) % 2 === 0 ? PALETTE.board : PALETTE.boardAlt;
-          context.fillRect(x, y, BOARD.cell, BOARD.cell);
-          // The grove is alive at night: deterministic glow-flowers and
-          // grass tufts, the same on every visit to the same cell.
-          const flowerRoll = cellHash(col, row, 7);
-          if (flowerRoll > 0.55) {
-            const fx = x + 14 + cellHash(col, row, 8) * 44;
-            const fy = y + 14 + cellHash(col, row, 9) * 44;
-            const petal = flowerRoll > 0.85 ? '#f9a8d4' : flowerRoll > 0.7 ? '#fde68a' : '#dbeafe';
-            context.globalAlpha = 0.28;
-            circle(fx, fy, 7, petal);
-            context.globalAlpha = 1;
-            circle(fx, fy, 3.5, petal);
-            circle(fx, fy, 1.5, '#f2b705');
-          }
-          if (cellHash(col, row, 10) > 0.5) {
-            const tx = x + 12 + cellHash(col, row, 11) * 48;
-            const ty = y + 40 + cellHash(col, row, 12) * 20;
-            context.strokeStyle = 'rgba(120, 180, 140, 0.28)';
-            context.lineWidth = 2;
-            context.beginPath();
-            context.moveTo(tx - 4, ty + 6);
-            context.lineTo(tx - 5, ty - 2);
-            context.moveTo(tx, ty + 6);
-            context.lineTo(tx, ty - 4);
-            context.moveTo(tx + 4, ty + 6);
-            context.lineTo(tx + 5, ty - 2);
-            context.stroke();
-          }
-          context.fillStyle = 'rgba(160, 190, 230, 0.08)';
-          if (cellHash(col, row, 4) > 0.6) {
-            context.beginPath();
-            context.arc(x + 18 + cellHash(col, row, 5) * 36, y + 18 + cellHash(col, row, 6) * 36, 4, 0, Math.PI * 2);
-            context.fill();
-          }
+        } else if (season.grove === 'Amber Hollow') {
+          const lx = x + 14 + cellHash(col, row, 32) * 44;
+          const ly = y + 14 + cellHash(col, row, 33) * 44;
+          ellipse(lx, ly, 7, 3.5, cellHash(col, row, 34) * Math.PI, 'rgba(217, 142, 50, 0.45)');
+          ellipse(lx + 14, ly + 12, 6, 3, cellHash(col, row, 35) * Math.PI, 'rgba(233, 196, 106, 0.4)');
+        } else if (season.grove === 'Frosthollow') {
+          context.fillStyle = 'rgba(230, 242, 255, 0.5)';
+          circle(x + 12 + cellHash(col, row, 32) * 48, y + 12 + cellHash(col, row, 33) * 48, 2.5, 'rgba(230, 242, 255, 0.5)');
+          circle(x + 12 + cellHash(col, row, 34) * 48, y + 12 + cellHash(col, row, 35) * 48, 2, 'rgba(230, 242, 255, 0.4)');
+          circle(x + 12 + cellHash(col, row, 36) * 48, y + 12 + cellHash(col, row, 37) * 48, 1.5, 'rgba(230, 242, 255, 0.35)');
         }
       }
     }
@@ -303,20 +387,17 @@ export function createRenderer(canvas) {
     for (const crater of MOON.craters) {
       circle(MOON.x + crater.dx, MOON.y + crater.dy, crater.radius, crater.color);
     }
-    context.strokeStyle = 'rgba(140, 170, 220, 0.10)';
-    context.lineWidth = 1;
-    for (let col = 0; col <= BOARD.cols; col += 1) {
+    // A full moon calls: when the moonlight charge is full, a gold ring pulses
+    // around the moon, so the Moonbeam reads from anywhere on the board.
+    if (state.moonlight >= MOONLIGHT_MAX) {
+      context.strokeStyle = `rgba(242, 183, 5, ${0.4 + 0.2 * Math.sin(elapsed * 4)})`;
+      context.lineWidth = 3;
       context.beginPath();
-      context.moveTo(BOARD.x + col * BOARD.cell, BOARD.y);
-      context.lineTo(BOARD.x + col * BOARD.cell, BOARD.y + BOARD.rows * BOARD.cell);
+      context.arc(MOON.x, MOON.y, MOON.radius + 8, 0, Math.PI * 2);
       context.stroke();
     }
-    for (let row = 0; row <= BOARD.rows; row += 1) {
-      context.beginPath();
-      context.moveTo(BOARD.x, BOARD.y + row * BOARD.cell);
-      context.lineTo(BOARD.x + BOARD.cols * BOARD.cell, BOARD.y + row * BOARD.cell);
-      context.stroke();
-    }
+    // No grid lines: the board is a garden, not a board game. (The hover
+    // ghost and the selected tower's range still draw their own outlines.)
     // The west gate: where the pests come in.
     context.fillStyle = '#3a4a63';
     context.fillRect(BOARD.x - 2, BOARD.y + BOARD.cell * 0.5, 10, BOARD.cell);
@@ -949,6 +1030,146 @@ export function createRenderer(canvas) {
     context.globalAlpha = 1;
   }
 
+  /**
+   * The Moonbeam's strike, while it is still visible: the struck row lit up
+   * so the row reads, a bright shaft from the moon to the impact point, and
+   * a burst where it lands. Drawn over the vignette so it stays bright.
+   */
+  function drawMoonbeam(state, elapsed) {
+    const beam = state.moonbeam;
+    if (!beam || beam.until <= elapsed) return;
+    const remaining = (beam.until - elapsed) / MOONBEAM_BEAM_SECONDS;
+    const alpha = Math.min(1, remaining * 2);
+    context.globalAlpha = 0.18 * alpha;
+    context.fillStyle = '#bcd8f5';
+    context.fillRect(BOARD.x, BOARD.y + beam.row * BOARD.cell, BOARD.cols * BOARD.cell, BOARD.cell);
+    context.globalAlpha = 1;
+    const dx = beam.x - MOON.x;
+    const dy = beam.y - MOON.y;
+    const length = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx);
+    context.save();
+    context.translate(MOON.x, MOON.y);
+    context.rotate(angle);
+    const gradient = context.createLinearGradient(0, 0, length, 0);
+    gradient.addColorStop(0, `rgba(220, 235, 255, ${0.85 * alpha})`);
+    gradient.addColorStop(0.7, `rgba(188, 216, 245, ${0.5 * alpha})`);
+    gradient.addColorStop(1, `rgba(188, 216, 245, ${0.15 * alpha})`);
+    context.fillStyle = gradient;
+    context.beginPath();
+    context.moveTo(0, -14);
+    context.lineTo(length, -30);
+    context.lineTo(length, 30);
+    context.lineTo(0, 14);
+    context.closePath();
+    context.fill();
+    context.restore();
+    context.globalAlpha = 0.5 * alpha;
+    circle(beam.x, beam.y, 52, '#bcd8f5');
+    context.globalAlpha = 0.8 * alpha;
+    circle(beam.x, beam.y, 26, '#ffffff');
+    context.globalAlpha = 1;
+  }
+
+  /**
+   * The Warden, the grove's guardian wisp: a hovering gold lantern-orb with
+   * a leaf sprig, bobbing over the garden. Its aura reads as a dashed gold
+   * ring — every plant inside it deals +25% damage — and while its zap is
+   * ready a fainter ring shows how far the bolt can reach; while it
+   * recharges, a gold arc sweeps back around the aura. The zap itself is a
+   * jagged bolt to the struck pest, bright for a quarter of a second.
+   */
+  function drawWarden(state, elapsed) {
+    const warden = state.warden;
+    if (!warden) return;
+    const bob = Math.sin(elapsed * 2.2) * 4;
+    const x = warden.x;
+    const y = warden.y + bob;
+    // The aura ring: dashed gold, so the strengthened ground reads at once.
+    context.strokeStyle = 'rgba(242, 183, 5, 0.4)';
+    context.lineWidth = 2;
+    context.setLineDash([8, 6]);
+    context.beginPath();
+    context.arc(x, warden.y, WARDEN_AURA_RADIUS, 0, Math.PI * 2);
+    context.stroke();
+    context.setLineDash([]);
+    if (warden.zapCooldown <= 0) {
+      // The zap's reach, while the zap is ready: a faint ring, so the player
+      // can see which pests are in range before clicking one.
+      context.strokeStyle = 'rgba(255, 224, 102, 0.16)';
+      context.lineWidth = 1.5;
+      context.setLineDash([4, 8]);
+      context.beginPath();
+      context.arc(x, warden.y, WARDEN_ZAP_RANGE, 0, Math.PI * 2);
+      context.stroke();
+      context.setLineDash([]);
+    } else {
+      // The recharge sweeps back in gold around the aura.
+      const share = 1 - warden.zapCooldown / WARDEN_ZAP_COOLDOWN;
+      context.strokeStyle = 'rgba(242, 183, 5, 0.75)';
+      context.lineWidth = 3;
+      context.beginPath();
+      context.arc(x, warden.y, WARDEN_AURA_RADIUS, -Math.PI / 2, -Math.PI / 2 + share * Math.PI * 2);
+      context.stroke();
+    }
+    ellipse(x, warden.y + 22, 16, 5, 0, 'rgba(0,0,0,0.25)');
+    // A three-ring halo, like a bloomed plant's: the Warden is a creature of
+    // the same moonlit garden, not a cursor with a job.
+    const haloPulse = 0.9 + 0.1 * Math.sin(elapsed * 1.6);
+    context.globalAlpha = 0.08 * haloPulse;
+    circle(x, y, 30, '#ffe066');
+    context.globalAlpha = 0.14 * haloPulse;
+    circle(x, y, 23, '#ffe066');
+    context.globalAlpha = 0.22 * haloPulse;
+    circle(x, y, 17, '#ffe066');
+    context.globalAlpha = 1;
+    circle(x, y, 14, '#ffeeb0');
+    circle(x, y, 10, '#fff6d8');
+    circle(x - 3, y - 3, 3, '#ffffff');
+    // The leaf sprig on top, and two dark eyes: the wisp has a face.
+    ellipse(x - 5, y - 15, 6, 3, -0.6, '#7ed491');
+    ellipse(x + 5, y - 15, 6, 3, 0.6, '#7ed491');
+    circle(x - 4, y - 1, 2, '#3a2a00');
+    circle(x + 4, y - 1, 2, '#3a2a00');
+    // The zap's bolt, while it lasts: a jagged line from the wisp to the
+    // struck pest, bright gold with a white core. The kinks are fixed
+    // offsets, so the same bolt always draws the same way.
+    const zap = warden.zap;
+    if (zap && zap.until > elapsed) {
+      const alpha = Math.min(1, (zap.until - elapsed) / WARDEN_BOLT_SECONDS);
+      const dx = zap.x - x;
+      const dy = zap.y - y;
+      const length = Math.hypot(dx, dy) || 1;
+      const px = -dy / length;
+      const py = dx / length;
+      const mid1x = x + dx * 0.33 + px * 9;
+      const mid1y = y + dy * 0.33 + py * 9;
+      const mid2x = x + dx * 0.66 - px * 7;
+      const mid2y = y + dy * 0.66 - py * 7;
+      context.globalAlpha = alpha;
+      context.strokeStyle = '#ffe066';
+      context.lineWidth = 4;
+      context.lineJoin = 'round';
+      context.beginPath();
+      context.moveTo(x, y);
+      context.lineTo(mid1x, mid1y);
+      context.lineTo(mid2x, mid2y);
+      context.lineTo(zap.x, zap.y);
+      context.stroke();
+      context.strokeStyle = '#ffffff';
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.moveTo(x, y);
+      context.lineTo(mid1x, mid1y);
+      context.lineTo(mid2x, mid2y);
+      context.lineTo(zap.x, zap.y);
+      context.stroke();
+      context.globalAlpha = 0.6 * alpha;
+      circle(zap.x, zap.y, 14, '#ffe066');
+      context.globalAlpha = 1;
+    }
+  }
+
   function drawHud(state, ui, season, records) {
     context.fillStyle = PALETTE.hud;
     context.fillRect(0, 0, FIELD.width, HUD.height);
@@ -994,7 +1215,7 @@ export function createRenderer(canvas) {
     circle(962, 26, 12, season.accent);
     text(season.glyph, 962, 32, 15, '#0b1726', 'center', true);
     text(season.name, 980, 30, 18, PALETTE.textLight, 'left', true);
-    text(`${wavesLeftInSeason(Math.max(state.wave, 1))} waves left`, 980, 50, 12, 'rgba(243,234,211,0.75)', 'left');
+    text(`${season.grove} \u00B7 ${wavesLeftInSeason(Math.max(state.wave, 1))} waves left`, 980, 50, 12, 'rgba(243,234,211,0.75)', 'left');
     // Score and best.
     text('SCORE', 1150, 17, 12, 'rgba(243,234,211,0.75)', 'left', true);
     text(state.score.toLocaleString('en-US'), 1150, 39, 22, PALETTE.textLight, 'left', true);
@@ -1158,6 +1379,7 @@ export function createRenderer(canvas) {
       drawButton(button, `WAVE ${state.wave} IN PROGRESS`, false, 'hold the grove…');
     }
     drawSunburstButton(state, ui);
+    drawMoonbeamButton(state, ui);
     // Info box: selected plant, selected card, or the season. Shorter than v2:
     // the Sunburst button took the room above it, and the tutorial lines live
     // on the title screen now.
@@ -1177,8 +1399,10 @@ export function createRenderer(canvas) {
       if (def.harvest) {
         text(`Harvests ${plantHarvest(selected.stage, mods)} sun every 5s`, x + 14, boxY + 68, 15, PALETTE.text, 'left');
       } else {
-        const damage = plantDamage(def, selected.stage, selected.nourished, season, mods);
-        text(`Damage ${damage.toFixed(0)}  ·  ${def.rate}/s  ·  Range ${Math.round(plantRange(def, selected.stage, mods))}`, x + 14, boxY + 68, 15, PALETTE.text, 'left');
+        const aura = wardenAuraMul(selected, state.warden);
+        const damage = plantDamage(def, selected.stage, selected.nourished, season, mods) * state.greenhouseDamage * aura;
+        const auraNote = aura > 1 ? ' · Warden +25%' : '';
+        text(`Damage ${damage.toFixed(0)}  ·  ${def.rate}/s  ·  Range ${Math.round(plantRange(def, selected.stage, mods))}${auraNote}`, x + 14, boxY + 68, 15, PALETTE.text, 'left');
         if (def.slow > 0) text(`Slows pests ${Math.round(def.slow * 100)}%`, x + 14, boxY + 88, 15, PALETTE.text, 'left');
         if (def.splash > 0) text(`Splash ${Math.round(def.splash * mods.splash)}px${def.poison > 0 ? ' · poison' : ''}`, x + 14, boxY + 88, 15, PALETTE.text, 'left');
       }
@@ -1210,7 +1434,7 @@ export function createRenderer(canvas) {
         else text('Click a grass cell to plant it.', x + 14, boxY + 88, 15, PALETTE.cardAfford, 'left', true);
       }
     } else {
-      text(`${season.glyph} ${season.name}`, x + 14, boxY + 26, 21, PALETTE.text, 'left', true);
+      text(`${season.glyph} ${season.name} \u2014 ${season.grove}`, x + 14, boxY + 26, 21, PALETTE.text, 'left', true);
       // The drafted wave rides on the tagline only when the two fit the box:
       // the longest taglines already fill it on their own.
       const drafted = state.seasonDraftedAt > 0 ? ` · drafted wave ${state.seasonDraftedAt}` : '';
@@ -1219,15 +1443,20 @@ export function createRenderer(canvas) {
         ? `${season.tagline}${drafted}`
         : season.tagline;
       text(tagline, x + 14, boxY + 46, 14, PALETTE.muted, 'left');
-      text(`Kills: ${state.kills}   \u00B7   Leaked: ${state.leaked}`, x + 14, boxY + 68, 15, PALETTE.text, 'left');
+      text(`Kills: ${state.kills}   \u00B7   Leaked: ${state.leaked}   \u00B7   Zaps: ${state.warden?.zaps ?? 0}`, x + 14, boxY + 68, 15, PALETTE.text, 'left');
       // The draft count rides on the sunlight line: the cover says plainly
       // that the seasons were chosen, not merely dealt.
       const draftNote = state.draftNumber > 0 ? `   \u00B7   Draft ${state.draftNumber}/3` : '';
       text(`Sun earned: ${state.earned}${draftNote}`, x + 14, boxY + 88, 15, PALETTE.text, 'left');
     }
     // Blessings the grove has granted this run: six chips in two rows of three.
+    // A blessing deepened to level 2 wears a gold glyph; the header counts them.
     text('BLESSINGS', x, 534, 15, PALETTE.muted, 'left', true);
-    text(`${state.blessings.length}/10`, x + w, 534, 15, PALETTE.muted, 'right', true);
+    const level2Count = state.blessings.filter((id) => (state.blessingLevels?.[id] ?? 1) === 2).length;
+    text(
+      level2Count > 0 ? `${state.blessings.length}/10 · ${level2Count} LV2` : `${state.blessings.length}/10`,
+      x + w, 534, 15, PALETTE.muted, 'right', true,
+    );
     if (state.blessings.length === 0) {
       text('Draft a season to earn a blessing.', x, 562, 14, PALETTE.muted, 'left');
       text('A flawless season earns a bonus one.', x, 584, 14, PALETTE.muted, 'left');
@@ -1236,7 +1465,8 @@ export function createRenderer(canvas) {
         const blessing = blessingById(id);
         const col = index % 3;
         const row = Math.floor(index / 3);
-        chip(x + col * 130, 542 + row * 26, 124, 22, blessing.glyph, blessing.name);
+        const level = state.blessingLevels?.[id] ?? 1;
+        chip(x + col * 130, 542 + row * 26, 124, 22, blessing.glyph, blessing.name, level === 2 ? PALETTE.gold : null);
       });
     }
     // Champions felled, feats held and plants in full bloom, live: the run's
@@ -1249,7 +1479,7 @@ export function createRenderer(canvas) {
     drawButton(LAYOUT.pauseButton, 'PAUSE', true, null, 17);
     drawButton(LAYOUT.muteButton, ui.muted ? 'MUTED' : 'SOUND', true, null, 17);
     // Hints.
-    text('1–6 pick a plant · click grass to plant', x, 664, 14, PALETTE.muted, 'left');
+    text('1–6 pick a plant · click grass to plant · W moonbeam', x, 664, 14, PALETTE.muted, 'left');
     text('Space start wave · Q sunburst · F speed · P pause · M mute', x, 684, 14, PALETTE.muted, 'left');
     text('Kills in a row build a combo — up to \u00D78 score.', x, 706, 14, PALETTE.cardAfford, 'left', true);
   }
@@ -1290,6 +1520,43 @@ export function createRenderer(canvas) {
     context.fill();
     const reason = status.reason === 'needs sunlight' ? `needs ${status.cost}\u2600` : status.reason === 'no pests' ? 'no pests on field' : status.reason;
     text('\u2600 SUNBURST', rect.x + rect.w / 2, rect.y + 22, 18, '#ffffff', 'center', true);
+    text(reason, rect.x + rect.w / 2, rect.y + 38, 12, 'rgba(255,255,255,0.8)', 'center');
+  }
+
+  /** The Moonbeam hero button: pale moonlight when ready, a charge meter while kills feed it. */
+  function drawMoonbeamButton(state, ui) {
+    const rect = LAYOUT.moonbeamButton;
+    const status = ui.moonbeam ?? { ready: false, moonlight: 0, cost: 100, reason: 'charging' };
+    if (status.ready) {
+      const glow = 0.25 + Math.sin(state.elapsed * 4) * 0.12;
+      context.fillStyle = `rgba(188, 216, 245, ${glow})`;
+      roundRect(rect.x - 4, rect.y - 4, rect.w + 8, rect.h + 8, 13);
+      context.fill();
+      context.fillStyle = '#bcd8f5';
+      roundRect(rect.x, rect.y, rect.w, rect.h, 10);
+      context.fill();
+      context.fillStyle = '#5a6a8a';
+      roundRect(rect.x, rect.y + rect.h - 6, rect.w, 6, 3);
+      context.fill();
+      text('\u263E MOONBEAM', rect.x + rect.w / 2, rect.y + 22, 18, '#1a2a44', 'center', true);
+      text('READY \u00B7 W', rect.x + rect.w / 2, rect.y + 38, 12, '#33456a', 'center', true);
+      return;
+    }
+    context.fillStyle = '#4a5a70';
+    roundRect(rect.x, rect.y, rect.w, rect.h, 10);
+    context.fill();
+    // The charge sweeps back in moonlight as kills feed the moon.
+    const share = Math.min(1, status.moonlight / status.cost);
+    if (share > 0) {
+      context.fillStyle = 'rgba(188, 216, 245, 0.5)';
+      roundRect(rect.x, rect.y, Math.max(10, rect.w * share), rect.h, 10);
+      context.fill();
+    }
+    context.fillStyle = '#3a4757';
+    roundRect(rect.x, rect.y + rect.h - 6, rect.w, 6, 3);
+    context.fill();
+    const reason = status.reason === 'no pests' ? 'no pests on field' : status.reason === 'charging' ? `\u263E ${status.moonlight}/${status.cost}` : status.reason;
+    text('\u263E MOONBEAM', rect.x + rect.w / 2, rect.y + 22, 18, '#ffffff', 'center', true);
     text(reason, rect.x + rect.w / 2, rect.y + 38, 12, 'rgba(255,255,255,0.8)', 'center');
   }
 
@@ -1402,6 +1669,76 @@ export function createRenderer(canvas) {
     return lines;
   }
 
+  /**
+   * The year's twenty waves as a path of nodes: five per season block, the
+   * draft/champion waves ringed in gold, the boss wave violet and bigger.
+   * `cleared` waves are walked (filled gold); the rest are ahead (outline).
+   * `fellOn` marks the wave a lost run fell on with a red cross. Block labels
+   * name what each five waves hold (grove, champion, boss). Shared by the
+   * title (the year as a plan) and the end screens (the path walked).
+   */
+  function drawYearMap(x, y, w, h, opts) {
+    const { cleared, fellOn, labels, title } = opts;
+    context.fillStyle = PALETTE.panel;
+    roundRect(x, y, w, h, 12);
+    context.fill();
+    text(title, x + 24, y + h / 2 + 5, 13, PALETTE.muted, 'left', true);
+    const nodeX0 = x + 150;
+    const nodeX1 = x + w - 16;
+    const step = (nodeX1 - nodeX0) / 19;
+    const cy = y + 16;
+    const r = 9;
+    context.strokeStyle = 'rgba(233, 238, 247, 0.25)';
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(nodeX0, cy);
+    context.lineTo(nodeX1, cy);
+    context.stroke();
+    if (cleared > 0) {
+      context.strokeStyle = PALETTE.gold;
+      context.beginPath();
+      context.moveTo(nodeX0, cy);
+      context.lineTo(nodeX0 + Math.min(19, cleared - 1) * step, cy);
+      context.stroke();
+    }
+    // The roads not taken: a faded branch below each draft node (waves 5,
+    // 10, 15), where the year forked and the player chose one season over
+    // two others. A hollow node ends each branch — the choice not made.
+    // The branches sit between the block labels, never under their text.
+    context.strokeStyle = 'rgba(233, 238, 247, 0.4)';
+    context.lineWidth = 1.5;
+    for (const draftWave of [5, 10, 15]) {
+      const bx = nodeX0 + (draftWave - 1) * step;
+      context.beginPath();
+      context.moveTo(bx, cy + 9);
+      context.lineTo(bx + 12, cy + 16);
+      context.stroke();
+      context.beginPath();
+      context.arc(bx + 12, cy + 16, 3.5, 0, Math.PI * 2);
+      context.stroke();
+    }
+    for (let wave = 1; wave <= 20; wave += 1) {
+      const nx = nodeX0 + (wave - 1) * step;
+      const walked = wave <= cleared;
+      const isBoss = wave === 20;
+      const isChampion = wave === 5 || wave === 10 || wave === 15;
+      const radius = isBoss ? r + 3 : r;
+      circle(nx, cy, radius, walked ? (isBoss ? '#a78bfa' : PALETTE.gold) : '#16283e');
+      context.strokeStyle = isBoss ? '#a78bfa' : isChampion ? PALETTE.gold : walked ? PALETTE.gold : 'rgba(233,238,247,0.35)';
+      context.lineWidth = isChampion || isBoss ? 2.5 : 1.5;
+      context.beginPath();
+      context.arc(nx, cy, radius, 0, Math.PI * 2);
+      context.stroke();
+      if (fellOn === wave) {
+        text('\u2715', nx, cy + 4, 12, '#ff6b6b', 'center', true);
+      }
+    }
+    labels.forEach((label, block) => {
+      const centreX = nodeX0 + (block * 5 + 2) * step;
+      text(label, centreX, y + h - 6, 11, PALETTE.muted, 'center', true);
+    });
+  }
+
   function drawTitlePanel(records, ui) {
     context.fillStyle = 'rgba(6, 12, 22, 0.45)';
     context.fillRect(0, 0, FIELD.width, FIELD.height);
@@ -1419,7 +1756,7 @@ export function createRenderer(canvas) {
     titleGold.addColorStop(1, '#fff6d8');
     text('SEEDWARDEN', FIELD.width / 2, 118, 72, titleGold, 'center', true);
     text('Draft the seasons. Grow the grove. Hold the Heart Tree.', FIELD.width / 2, 156, 24, '#b9d2e8', 'center');
-    text('6 plants  ·  3 stages  ·  8 seasons  ·  10 blessings  ·  3 champions  ·  5 feats  ·  20 waves  ·  1 Blight', FIELD.width / 2, 184, 16, '#b9d2e8', 'center');
+    text('6 plants  ·  3 stages  ·  8 seasons  ·  10 blessings  ·  3 champions  ·  5 feats  ·  20 waves  ·  1 Blight  ·  9 greenhouse upgrades', FIELD.width / 2, 184, 16, '#b9d2e8', 'center');
     // Left: how to play.
     context.fillStyle = PALETTE.panel;
     roundRect(90, 210, 470, 190, 14);
@@ -1427,14 +1764,16 @@ export function createRenderer(canvas) {
     text('HOW TO PLAY', 114, 242, 20, PALETTE.text, 'left', true);
     const howLines = [
       '1–6 pick a plant · click grass to plant it',
+      'Click ground to move the Warden · click a pest to zap',
+      'Plants near the Warden deal +25% damage',
       'Space starts the next wave early (+sun)',
-      'Q Sunburst: 150\u2600 blasts every pest on field',
+      'Q Sunburst · W Moonbeam: the two hero powers',
       'Every 5 waves, draft the next season',
-      'Each season grants a blessing, forever',
+      `Greenhouse ${greenhousePips(records)} · G grows them`,
       'WIN hold the tree 20 waves · LOSE it falls',
     ];
     howLines.forEach((line, index) => {
-      text(line, 114, 272 + index * 22, 16, PALETTE.text, 'left');
+      text(line, 114, 268 + index * 18, 16, PALETTE.text, 'left');
     });
     // Right: choose your grove — three difficulties, one picked.
     context.fillStyle = PALETTE.panel;
@@ -1461,25 +1800,42 @@ export function createRenderer(canvas) {
     // The bestiary strip: every foe with its note — what it does, and when
     // the champions and the boss walk — so the title teaches the whole hunt.
     context.fillStyle = PALETTE.panel;
-    roundRect(90, 408, 1100, 68, 14);
+    roundRect(90, 404, 1100, 52, 14);
     context.fill();
-    text('THE PESTS', 114, 447, 17, PALETTE.text, 'left', true);
+    text('THE PESTS', 114, 431, 17, PALETTE.text, 'left', true);
     const pestOrder = ['aphid', 'moth', 'beetle', 'slug', 'gloomcap', 'mirewarden', 'rotmother', 'blight'];
     pestOrder.forEach((type, index) => {
       const def = PESTS[type];
       const x = 240 + index * 120;
-      circle(x, 440, 9, def.body);
+      circle(x, 428, 9, def.body);
       // The Mire Warden's full name crowds the next icon: the strip shortens it.
-      text(type === 'mirewarden' ? 'Mire Warden' : def.name, x + 14, 445, 14, PALETTE.text, 'left', true);
-      text(def.note, x + 14, 463, 12, PALETTE.muted, 'left');
+      text(type === 'mirewarden' ? 'Mire Warden' : def.name, x + 14, 433, 14, PALETTE.text, 'left', true);
+      text(def.note, x + 14, 449, 12, PALETTE.muted, 'left');
+    });
+    // The year as a plan: twenty waves, four groves, three champions, one
+    // Blight — the whole campaign on the title, before the first wave.
+    drawYearMap(90, 462, 1100, 40, {
+      cleared: 0,
+      fellOn: 0,
+      title: 'THE YEAR',
+      labels: [
+        'W1\u20135 \u00B7 DEWMERE FEN \u00B7 GLOOMCAP',
+        'W6\u201310 \u00B7 MIRE WARDEN',
+        'W11\u201315 \u00B7 ROTMOTHER',
+        'W16\u201320 \u00B7 THE BLIGHT',
+      ],
     });
     drawButton(LAYOUT.titlePlay, 'PLAY', true, null);
     drawButton(LAYOUT.titleHow, 'HOW TO PLAY', true, null);
+    // No sub-line: the footer below already says "SEEDS n · GREENHOUSE n/9",
+    // and a sub on a 44px button collides with the label.
+    drawButton(LAYOUT.titleGreenhouse, 'GREENHOUSE', true, null);
     const best = records.best > 0 ? records.best.toLocaleString('en-US') : '\u2014';
     const furthest = records.furthest > 0 ? String(records.furthest) : '\u2014';
     const featCount = (records.feats ?? []).length;
-    text(`BEST ${best}  ·  FURTHEST WAVE ${furthest}  ·  GROVES SAVED ${records.saved}  ·  FEATS ${featCount}/${FEATS.length}  ·  SEEDS ${records.seeds ?? 0}`, FIELD.width / 2, 664, 17, '#b9d2e8', 'center', true);
-    text('1–6 plant  ·  Space start wave  ·  Q sunburst  ·  R reroll  ·  F speed  ·  P pause  ·  M mute', FIELD.width / 2, 700, 13, 'rgba(185,210,232,0.6)', 'center');
+    const grownCount = (records.greenhouse ?? []).length;
+    text(`BEST ${best}  ·  FURTHEST WAVE ${furthest}  ·  GROVES SAVED ${records.saved}  ·  FEATS ${featCount}/${FEATS.length}  ·  SEEDS ${records.seeds ?? 0}  ·  GREENHOUSE ${grownCount}/9 ${greenhousePips(records)}`, FIELD.width / 2, 664, 17, '#b9d2e8', 'center', true);
+    text('1–6 plant  ·  Space start wave  ·  Q sunburst  ·  W moonbeam  ·  R reroll  ·  F speed  ·  P pause  ·  M mute  ·  G greenhouse', FIELD.width / 2, 700, 13, 'rgba(185,210,232,0.6)', 'center');
   }
 
   function drawHowPanel() {
@@ -1498,15 +1854,20 @@ export function createRenderer(canvas) {
       'Every 5 waves, draft the next season: each one changes the rules',
       'and grants a blessing that lasts the rest of the game.',
       'Q fires the Sunburst: 150 sun, every pest on the field takes 80 damage.',
+      'W fires the Moonbeam: every kill charges moonlight; at 100, the moon',
+      'strikes a whole row — the row thickest with pests.',
+      'The Warden follows your clicks: plants near it deal +25% damage.',
+      'Click a pest to zap it — 30 damage, then 3 seconds to recharge.',
       'R redraws the draft for 25 sun. Champions walk on waves 5, 10 and 15.',
       'Kills close together build a combo — up to \u00D78 score. A leak spends it.',
       'A flawless season (no leaks) earns a bonus blessing.',
+      'G opens the Greenhouse: spend banked seeds on upgrades that last every run.',
       'Survive all 20 waves to win. Then try endless mode.',
     ];
     lines.forEach((line, index) => {
-      text(line, FIELD.width / 2, 190 + index * 28, 20, PALETTE.text, 'center');
+      text(line, FIELD.width / 2, 182 + index * 23, 20, PALETTE.text, 'center');
     });
-    text('Space start wave  ·  Q sunburst  ·  R reroll  ·  F speed  ·  P pause  ·  M mute', FIELD.width / 2, 505, 18, PALETTE.muted, 'center');
+    text('Space start wave  ·  Q sunburst  ·  W moonbeam  ·  R reroll  ·  F speed  ·  P pause  ·  M mute  ·  G greenhouse', FIELD.width / 2, 545, 18, PALETTE.muted, 'center');
     drawButton(LAYOUT.howBack, 'BACK', true, null);
   }
 
@@ -1554,7 +1915,7 @@ export function createRenderer(canvas) {
       const choosing = block === state.draftNumber;
       const season = picked ? ui.seasonFor(block * 5 + 1) : null;
       const label = picked
-        ? `${season?.glyph ?? '\u273F'} ${season?.name ?? 'Spring'} \u2713`
+        ? `${season?.glyph ?? '\u273F'} ${season?.grove ?? 'Dewmere Fen'} \u2713`
         : choosing
           ? '\u2726 choose now'
           : `draft at wave ${block * 5}`;
@@ -1596,13 +1957,16 @@ export function createRenderer(canvas) {
       roundRect(rect.x + 16, rect.y + 16, 78, 22, 11);
       context.fill();
       text(card.tag, rect.x + 55, rect.y + 31, 11, '#ffffff', 'center', true);
+      // The grove this season travels through, top right before the key number.
+      const baseGlyph = { spring: '\u273F', summer: '\u2600', autumn: '\u2766', winter: '\u2744' }[card.base] ?? '\u273F';
+      text(`${baseGlyph} ${groveFor(card.base).toUpperCase()}`, rect.x + rect.w - 48, rect.y + 31, 12, '#e0a92e', 'right', true);
       // Key number, top right.
       circle(rect.x + rect.w - 28, rect.y + 28, 13, PALETTE.text);
       text(String(index + 1), rect.x + rect.w - 28, rect.y + 33, 15, '#0b1726', 'center', true);
       // Season glyph in a tinted disc. The glyph is dark: the disc is light.
       const base = seasonTint;
       circle(rect.x + rect.w / 2, rect.y + 58, 30, base);
-      text({ spring: '\u273F', summer: '\u2600', autumn: '\u2766', winter: '\u2744' }[card.base] ?? '\u273F', rect.x + rect.w / 2, rect.y + 69, 30, '#0b1726', 'center', true);
+      text(baseGlyph, rect.x + rect.w / 2, rect.y + 69, 30, '#0b1726', 'center', true);
       text(card.name, rect.x + rect.w / 2, rect.y + 118, 25, PALETTE.text, 'center', true);
       const tagLines = wrapText(card.tagline, 32);
       tagLines.forEach((line, lineIndex) => {
@@ -1624,16 +1988,21 @@ export function createRenderer(canvas) {
         cursor += 24;
       }
       const blessing = blessingById(card.blessing);
-      const held = state.blessings.includes(card.blessing);
+      const level = state.blessings.includes(card.blessing) ? (state.blessingLevels?.[card.blessing] ?? 1) : 0;
       cursor += 8;
-      context.fillStyle = held ? 'rgba(233,238,247,0.08)' : 'rgba(242, 183, 5, 0.16)';
+      // A blessing held at level 1 deepens to level 2 when its card is
+      // picked (the pill says so, and the line below names the stronger
+      // effect); a blessing at its peak pays sunlight instead.
+      const pill = level === 1
+        ? { fill: 'rgba(242, 183, 5, 0.3)', label: `${blessing.glyph} ${blessing.name} — LEVEL 2`, blurb: blessing.blurb2 ?? blessing.blurb }
+        : level === 2
+          ? { fill: 'rgba(233,238,247,0.08)', label: `${blessing.glyph} ${blessing.name} — held: +75\u2600`, blurb: blessing.blurb }
+          : { fill: 'rgba(242, 183, 5, 0.16)', label: `${blessing.glyph} ${blessing.name}`, blurb: blessing.blurb };
+      context.fillStyle = pill.fill;
       roundRect(rect.x + 16, cursor, rect.w - 32, 30, 15);
       context.fill();
-      text(
-        held ? `${blessing.glyph} ${blessing.name} — held: +75\u2600` : `${blessing.glyph} ${blessing.name}`,
-        rect.x + rect.w / 2, cursor + 20, 15, PALETTE.text, 'center', true,
-      );
-      text(blessing.blurb, rect.x + rect.w / 2, cursor + 48, 13, PALETTE.muted, 'center');
+      text(pill.label, rect.x + rect.w / 2, cursor + 20, 15, PALETTE.text, 'center', true);
+      text(pill.blurb, rect.x + rect.w / 2, cursor + 48, 13, PALETTE.muted, 'center');
     });
     // Reroll: redraw the three cards for 25 sunlight, as often as the purse allows.
     drawButton(LAYOUT.draftReroll, `REROLL · ${REROLL_COST}\u2600`, state.sun >= REROLL_COST, null, 17);
@@ -1676,7 +2045,7 @@ export function createRenderer(canvas) {
     }
     context.fillStyle = victory ? 'rgba(6, 12, 22, 0.35)' : 'rgba(6, 12, 22, 0.62)';
     context.fillRect(0, 0, FIELD.width, FIELD.height);
-    const panel = { x: 240, y: 80, w: 800, h: 560 };
+    const panel = { x: 240, y: 80, w: 800, h: 580 };
     context.fillStyle = PALETTE.panel;
     roundRect(panel.x, panel.y, panel.w, panel.h, 16);
     context.fill();
@@ -1725,24 +2094,47 @@ export function createRenderer(canvas) {
       text(value, x, y + 24, 20, PALETTE.text, 'left', true);
     });
     text(`${grade.line}  \u00B7  ${grade.points} pts`, FIELD.width / 2, 340, 15, PALETTE.muted, 'center');
-    // The score by wave: one gold bar per wave cleared, from the run's own
-    // ledger — the season's shape at a glance, best wave called out.
+    // The score by grove: one bar per five-wave block, from the run's own
+    // ledger, with the block's grade under it — a clean block is S, leaks
+    // drag it down. A block the run never finished carries no grade.
     const scores = state.waveScores ?? [];
     if (scores.length > 0) {
       const deltas = scores.map((score, index) => score - (index === 0 ? 0 : scores[index - 1]));
-      const best = Math.max(...deltas);
-      const bestWave = deltas.indexOf(best) + 1;
-      text('SCORE BY WAVE', 470, 372, 13, PALETTE.muted, 'left', true);
-      text(`BEST WAVE ${bestWave} +${best.toLocaleString('en-US')}`, 1020, 372, 13, PALETTE.gold, 'right', true);
+      const blockTotals = [0, 1, 2, 3].map((block) => deltas.slice(block * 5, block * 5 + 5).reduce((sum, d) => sum + d, 0));
+      const bestTotal = Math.max(...blockTotals);
+      const bestBlock = blockTotals.indexOf(bestTotal);
+      text('SCORE BY GROVE', 470, 372, 13, PALETTE.muted, 'left', true);
+      text(`BEST BLOCK W${bestBlock * 5 + 1}\u2013${bestBlock * 5 + 5} +${bestTotal.toLocaleString('en-US')}`, 1020, 372, 13, PALETTE.gold, 'right', true);
       const chartX = 470;
       const chartW = 550;
       const chartY = 380;
-      const chartH = 36;
-      const slot = chartW / scores.length;
-      deltas.forEach((delta, index) => {
-        const height = best > 0 ? Math.max(3, (delta / best) * chartH) : 3;
-        context.fillStyle = index + 1 === bestWave ? PALETTE.gold : 'rgba(242, 183, 5, 0.55)';
-        context.fillRect(chartX + index * slot + 1, chartY + chartH - height, Math.max(2, slot - 2), height);
+      const chartH = 24;
+      const slot = chartW / 4;
+      // Blocks fully cleared get a grade; the block a lost run fell in —
+      // and the ones after it — carry none.
+      const clearedBlocks = victory ? 4 : Math.floor(Math.max(0, state.wave - 1) / 5);
+      blockTotals.forEach((total, block) => {
+        const barX = chartX + block * slot + (slot - 110) / 2;
+        const played = block * 5 < scores.length;
+        if (played && total > 0) {
+          const height = bestTotal > 0 ? Math.max(4, (total / bestTotal) * chartH) : 4;
+          context.fillStyle = block === bestBlock ? PALETTE.gold : 'rgba(242, 183, 5, 0.55)';
+          context.fillRect(barX, chartY + chartH - height, 110, height);
+        } else {
+          context.strokeStyle = 'rgba(255,255,255,0.18)';
+          context.lineWidth = 1;
+          context.strokeRect(barX, chartY, 110, chartH);
+        }
+        const grade = block < clearedBlocks ? blockGrade(state.blockStats?.[block]?.leaked ?? 0) : '—';
+        const labelX = chartX + block * slot + slot / 2;
+        const rangeLabel = `W${block * 5 + 1}\u2013${block * 5 + 5} · `;
+        context.font = font(11, true);
+        const rangeWidth = context.measureText(rangeLabel).width;
+        context.font = font(16, true);
+        const gradeWidth = context.measureText(grade).width;
+        const startX = labelX - (rangeWidth + gradeWidth) / 2;
+        text(rangeLabel, startX, 416, 11, PALETTE.muted, 'left', true);
+        text(grade, startX + rangeWidth, 416, 16, grade === '—' ? PALETTE.muted : GRADE_COLORS[grade], 'left', true);
       });
       context.fillStyle = 'rgba(255,255,255,0.25)';
       context.fillRect(chartX, chartY + chartH + 1, chartW, 1);
@@ -1763,12 +2155,26 @@ export function createRenderer(canvas) {
         FIELD.width / 2, 493, 14, '#d8b4fe', 'center', true,
       );
     }
-    // The blessings the run collected, as one line.
-    if (state.blessings.length === 0) {
-      text('No blessings this run — draft a season next time.', 280, 520, 14, PALETTE.muted, 'left');
+    // The path walked: the year's twenty waves, the ones cleared lit gold.
+    // (The blessings the run collected stay in the stat grid above — the
+    // path is the story of the year, and the panel has room for one line.)
+    const pathLabels = [
+      'W1\u20135 GLOOMCAP',
+      'W6\u201310 MIRE WARDEN',
+      'W11\u201315 ROTMOTHER',
+      'W16\u201320 THE BLIGHT',
+    ];
+    // Title kept short: the strip's title area is only 150px wide, and the
+    // nodes start at x+150 — a long title runs under them.
+    if (victory) {
+      drawYearMap(280, 506, 720, 40, { cleared: 20, fellOn: 0, title: 'THE PATH', labels: pathLabels });
     } else {
-      const names = state.blessings.map((id) => blessingById(id).name).join(' · ');
-      text(`BLESSINGS ${state.blessings.length}/10: ${names}`, 280, 520, 13, PALETTE.muted, 'left');
+      drawYearMap(280, 486, 720, 40, {
+        cleared: Math.max(0, state.wave - 1),
+        fellOn: state.wave,
+        title: 'THE PATH',
+        labels: pathLabels,
+      });
     }
     if (victory) {
       drawButton(LAYOUT.victoryAgain, 'PLAY AGAIN', true, null, 20);
@@ -1779,15 +2185,70 @@ export function createRenderer(canvas) {
       drawButton(LAYOUT.defeatTitle, 'BACK TO TITLE', true, null, 20);
     }
     const goal = nextGoal({ won: victory, difficulty: state.difficulty.id, wave: state.wave });
-    text(`NEXT GOAL: ${goal}`, FIELD.width / 2, 612, 15, '#e0a92e', 'center', true);
+    text(`NEXT GOAL: ${goal}`, FIELD.width / 2, 624, 15, '#e0a92e', 'center', true);
     const banked = records.seedsBanked ?? 0;
     const bankLine = victory && banked > 0
       ? `  \u00B7  +${banked} SEEDS BANKED (TOTAL ${records.seeds ?? banked})`
       : '';
     text(
-      `Seed ${ui.seed} \u00B7 ${state.difficulty.name.toUpperCase()} \u00B7 ${earned.length} feats this run${bankLine}`,
-      FIELD.width / 2, 634, 12, PALETTE.muted, 'center',
+      `Seed ${ui.seed} \u00B7 ${state.difficulty.name.toUpperCase()} \u00B7 ${earned.length} feats this run${bankLine}  \u00B7  GREENHOUSE ${greenhousePips(records)} \u00B7 G to grow \u00B7 R replay this seed`,
+      FIELD.width / 2, 646, 12, PALETTE.muted, 'center',
     );
+  }
+
+  /** The Greenhouse: nine permanent upgrades in three tracks, bought with banked seeds. */
+  function drawGreenhousePanel(records, ui) {
+    context.fillStyle = 'rgba(6, 12, 22, 0.55)';
+    context.fillRect(0, 0, FIELD.width, FIELD.height);
+    const panel = { x: 240, y: 80, w: 800, h: 560 };
+    context.fillStyle = PALETTE.panel;
+    roundRect(panel.x, panel.y, panel.w, panel.h, 16);
+    context.fill();
+    text('THE GREENHOUSE', FIELD.width / 2, 134, 40, PALETTE.text, 'center', true);
+    text('Seeds banked from won years grow permanent upgrades.', FIELD.width / 2, 162, 16, PALETTE.muted, 'center');
+    const grown = records.greenhouse ?? [];
+    const seeds = records.seeds ?? 0;
+    text(`${seeds} SEEDS  \u00B7  ${grown.length}/9 GROWN`, FIELD.width / 2, 192, 22, PALETTE.gold, 'center', true);
+    TRACKS.forEach((track, col) => {
+      const cx = 264 + col * 256 + 120;
+      text(`${track.glyph} ${track.name.toUpperCase()}`, cx, 228, 17, PALETTE.text, 'center', true);
+      text(track.blurb, cx, 244, 12, PALETTE.muted, 'center');
+    });
+    UPGRADES.forEach((upgrade, index) => {
+      const rect = LAYOUT.greenhouseCards[index];
+      const isGrown = grown.includes(upgrade.id);
+      const verdict = canGrow(grown, upgrade.id, seeds);
+      const hovered = ui.hover.inside && inside(rect, ui.hover.x, ui.hover.y);
+      context.fillStyle = isGrown ? 'rgba(127, 208, 138, 0.14)' : PALETTE.card;
+      roundRect(rect.x, rect.y, rect.w, rect.h, 10);
+      context.fill();
+      context.strokeStyle = isGrown ? '#7fd08a' : hovered && verdict.ok ? '#7fd08a' : PALETTE.cardEdge;
+      context.lineWidth = isGrown || (hovered && verdict.ok) ? 2.5 : 1.5;
+      roundRect(rect.x, rect.y, rect.w, rect.h, 10);
+      context.stroke();
+      text(`${upgrade.glyph} ${upgrade.name}`, rect.x + 12, rect.y + 22, 16, PALETTE.text, 'left', true);
+      text(`TIER ${upgrade.tier}`, rect.x + rect.w - 12, rect.y + 22, 12, PALETTE.muted, 'right', true);
+      const blurbLines = wrapText(upgrade.blurb, 34);
+      blurbLines.forEach((line, lineIndex) => {
+        text(line, rect.x + 12, rect.y + 42 + lineIndex * 16, 13, PALETTE.muted, 'left');
+      });
+      const pillY = rect.y + rect.h - 28;
+      if (isGrown) {
+        context.fillStyle = 'rgba(127, 208, 138, 0.25)';
+        roundRect(rect.x + 12, pillY, 110, 20, 10);
+        context.fill();
+        text('\u2713 GROWN', rect.x + 67, pillY + 14, 12, '#7fd08a', 'center', true);
+      } else if (verdict.ok) {
+        context.fillStyle = 'rgba(242, 183, 5, 0.25)';
+        roundRect(rect.x + 12, pillY, 110, 20, 10);
+        context.fill();
+        text(`GROW \u00B7 ${upgrade.cost} SEEDS`, rect.x + 67, pillY + 14, 12, PALETTE.gold, 'center', true);
+      } else {
+        text(verdict.reason, rect.x + 12, pillY + 14, 12, '#ff7a6b', 'left', true);
+      }
+    });
+    text('Upgrades apply to every new run — a lost year still leaves the grove stronger.', FIELD.width / 2, 588, 14, PALETTE.muted, 'center');
+    drawButton(LAYOUT.greenhouseBack, 'BACK', true, null, 17);
   }
 
   function drawPausedPanel() {
@@ -1810,17 +2271,23 @@ export function createRenderer(canvas) {
     drawTree(state, state.elapsed);
     for (const plant of state.plants) drawPlant(plant, state.elapsed);
     for (const pest of state.pests) drawPest(pest, state.elapsed);
+    drawWarden(state, state.elapsed);
     drawFireflies(state.elapsed);
     drawParticles(state);
     drawTracers(state);
     drawFloats(state);
     drawVignette();
+    drawMoonbeam(state, state.elapsed);
     if (screen === SCREEN_TITLE) {
       drawTitlePanel(records, ui);
       return;
     }
     if (screen === SCREEN_HOWTO) {
       drawHowPanel();
+      return;
+    }
+    if (screen === SCREEN_GREENHOUSE) {
+      drawGreenhousePanel(records, ui);
       return;
     }
     drawHud(state, ui, season, records);

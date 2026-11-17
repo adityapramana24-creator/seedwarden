@@ -11,6 +11,7 @@
 // pick from the same three.
 
 import { SEASONS } from './seasons.js';
+import { blessingById } from './blessings.js';
 
 /** Waves in one season: a draft follows every fifth cleared wave. */
 export const DRAFT_EVERY = 5;
@@ -153,6 +154,8 @@ export function seasonOfCard(card) {
   return {
     id: card.id,
     name: card.name,
+    grove: base.grove,
+    groveNote: base.groveNote,
     glyph: base.glyph,
     tagline: card.tagline,
     growth: card.growth,
@@ -181,12 +184,23 @@ function shuffle(random, items) {
 /**
  * Draw three cards for a draft. Cards whose blessing the player already holds
  * sink to the back of the deck, so the offer usually brings something new;
- * the current season's card never appears in its own draft. The draw uses the
- * world's seeded random, so it is the same for the same seed.
+ * the current season's card never appears in its own draft. When at least
+ * two fresh cards exist, the third slot can carry an upgrade: a card whose
+ * blessing is held at level 1, which deepens it to level 2 when picked.
+ * The draw uses the world's seeded random, so it is the same for the same
+ * seed — and the upgrade slot is carved out of the same two shuffles v5
+ * used, so no offer a v5 run would have drawn changes its first two cards.
  */
-export function drawOffer(random, heldBlessings, currentCardId) {
+export function drawOffer(random, heldBlessings, currentCardId, levels) {
   const pool = SEASON_CARDS.filter((card) => card.id !== currentCardId);
   const fresh = shuffle(random, pool.filter((card) => !heldBlessings.includes(card.blessing)));
   const stale = shuffle(random, pool.filter((card) => heldBlessings.includes(card.blessing)));
-  return [...fresh, ...stale].slice(0, 3);
+  const upgradable = stale.filter((card) => {
+    const level = levels?.[card.blessing] ?? 1;
+    const max = blessingById(card.blessing)?.maxLevel ?? 2;
+    return level < max;
+  });
+  const spent = stale.filter((card) => !upgradable.includes(card));
+  if (fresh.length >= 2 && upgradable.length > 0) return [fresh[0], fresh[1], upgradable[0]];
+  return [...fresh, ...upgradable, ...spent].slice(0, 3);
 }

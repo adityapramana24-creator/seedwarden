@@ -11,6 +11,8 @@ export const KEY_MUTE = 8;
 export const KEY_ESCAPE = 16;
 export const KEY_SUNBURST = 32;
 export const KEY_REROLL = 64;
+export const KEY_MOONBEAM = 128;
+export const KEY_GREENHOUSE = 256;
 
 const CONFIRM = new Set(['Space', 'Enter']);
 const PAUSE = new Set(['KeyP']);
@@ -19,6 +21,8 @@ const MUTE = new Set(['KeyM']);
 const ESCAPE = new Set(['Escape']);
 const SUNBURST = new Set(['KeyQ']);
 const REROLL = new Set(['KeyR']);
+const MOONBEAM = new Set(['KeyW']);
+const GREENHOUSE = new Set(['KeyG']);
 const CARDS = new Map([
   ['Digit1', 0], ['Digit2', 1], ['Digit3', 2],
   ['Digit4', 3], ['Digit5', 4], ['Digit6', 5],
@@ -41,6 +45,8 @@ export function createInput(canvas, toLogical) {
     else if (ESCAPE.has(event.code)) keys |= KEY_ESCAPE;
     else if (SUNBURST.has(event.code)) keys |= KEY_SUNBURST;
     else if (REROLL.has(event.code)) keys |= KEY_REROLL;
+    else if (MOONBEAM.has(event.code)) keys |= KEY_MOONBEAM;
+    else if (GREENHOUSE.has(event.code)) keys |= KEY_GREENHOUSE;
     else if (CARDS.has(event.code)) cardKey = CARDS.get(event.code);
     else return;
     event.preventDefault();
