@@ -66,33 +66,43 @@ export function isPlantable(col, row) {
   return col >= 0 && col < BOARD.cols && row >= 0 && row < BOARD.rows && !isPathCell(col, row);
 }
 
+/**
+ * The Moonlit Grove (v4): the garden at midnight under a full moon. Deep
+ * teal-indigo night for the board, a cool moonlit path, dark indigo glass
+ * for the panels — the parchment panels were the last thing that made the
+ * game read as a daytime board game — and one bold accent, Sun Gold, glowing
+ * against the dark. The plants are bioluminescent: each kind glows its own
+ * colour (see plants.js), the pests are dark silhouettes with glowing eyes,
+ * and the Blight is a rotting moon.
+ */
 export const PALETTE = {
-  backdrop: '#1e3320',
-  board: '#3a6b32',
-  boardAlt: '#335f2d',
-  soil: '#8a6a45',
-  soilEdge: '#77582f',
-  panel: '#f3ead3',
-  panelEdge: '#c9b98d',
-  card: '#fbf6e6',
-  cardEdge: '#b7a76e',
-  cardAfford: '#2f6b2f',
-  hud: '#223d1e',
-  text: '#22301f',
-  textLight: '#f3ead3',
-  muted: '#6b7a5e',
+  backdrop: '#0a1220',
+  board: '#152a3e',
+  boardAlt: '#122636',
+  soil: '#3a4757',
+  soilEdge: '#2a3542',
+  roadLight: '#66788f',
+  panel: '#16283e',
+  panelEdge: '#2e4a68',
+  card: '#1d3350',
+  cardEdge: '#35527a',
+  cardAfford: '#7fd08a',
+  hud: '#0b1726',
+  text: '#e9eef7',
+  textLight: '#e9eef7',
+  muted: '#93a8c4',
   sun: '#f2b705',
   gold: '#f2b705',
-  blight: '#7c5cbf',
-  heart: '#e5534b',
-  title: '#fbf6e6',
-  button: '#4a7c3a',
-  buttonEdge: '#2f5426',
-  danger: '#c0392b',
-  range: 'rgba(255, 255, 255, 0.16)',
-  rangeEdge: 'rgba(255, 255, 255, 0.55)',
-  ghostOk: 'rgba(120, 220, 120, 0.45)',
-  ghostBad: 'rgba(230, 90, 70, 0.45)',
+  blight: '#a78bfa',
+  heart: '#ff6b6b',
+  title: '#f4f1e4',
+  button: '#3f8a5f',
+  buttonEdge: '#1e4a34',
+  danger: '#ff6b6b',
+  range: 'rgba(160, 200, 255, 0.14)',
+  rangeEdge: 'rgba(160, 200, 255, 0.55)',
+  ghostOk: 'rgba(120, 220, 140, 0.45)',
+  ghostBad: 'rgba(255, 110, 90, 0.45)',
 };
 
 export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
@@ -103,3 +113,7 @@ export const BEST_KEY = 'seedwarden.best';
 export const FURTHEST_KEY = 'seedwarden.furthest';
 /** Where the count of groves saved (years won) is kept between visits. */
 export const SAVED_KEY = 'seedwarden.saved';
+/** Where the feats ever earned are kept between visits, as one comma-separated line of feat ids. */
+export const FEATS_KEY = 'seedwarden.feats';
+/** Where the seed bank is kept between visits: seeds earned by winning years, one per feat earned that run. */
+export const SEEDS_KEY = 'seedwarden.seeds';

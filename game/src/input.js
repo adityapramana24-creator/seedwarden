@@ -9,12 +9,16 @@ export const KEY_PAUSE = 2;
 export const KEY_SPEED = 4;
 export const KEY_MUTE = 8;
 export const KEY_ESCAPE = 16;
+export const KEY_SUNBURST = 32;
+export const KEY_REROLL = 64;
 
 const CONFIRM = new Set(['Space', 'Enter']);
 const PAUSE = new Set(['KeyP']);
 const SPEED = new Set(['KeyF']);
 const MUTE = new Set(['KeyM']);
 const ESCAPE = new Set(['Escape']);
+const SUNBURST = new Set(['KeyQ']);
+const REROLL = new Set(['KeyR']);
 const CARDS = new Map([
   ['Digit1', 0], ['Digit2', 1], ['Digit3', 2],
   ['Digit4', 3], ['Digit5', 4], ['Digit6', 5],
@@ -35,6 +39,8 @@ export function createInput(canvas, toLogical) {
     else if (SPEED.has(event.code)) keys |= KEY_SPEED;
     else if (MUTE.has(event.code)) keys |= KEY_MUTE;
     else if (ESCAPE.has(event.code)) keys |= KEY_ESCAPE;
+    else if (SUNBURST.has(event.code)) keys |= KEY_SUNBURST;
+    else if (REROLL.has(event.code)) keys |= KEY_REROLL;
     else if (CARDS.has(event.code)) cardKey = CARDS.get(event.code);
     else return;
     event.preventDefault();

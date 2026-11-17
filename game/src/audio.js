@@ -141,6 +141,37 @@ export function createAudio() {
       // A short tick that climbs: the combo is building.
       play((now) => tone(context, master, 740, 0.08, 'triangle', 0.18, now, 1180));
     },
+    sunburst() {
+      // Noon light, all at once: a bright chord that rises and rings.
+      play((now) => {
+        const notes = [784, 988, 1175, 1568];
+        notes.forEach((note) => tone(context, master, note, 0.4, 'triangle', 0.22, now));
+        tone(context, master, 2093, 0.5, 'sine', 0.18, now + 0.08);
+      });
+    },
+    bossPhase() {
+      // The Blight turns: a low snarl that climbs into a snarl.
+      play((now) => {
+        tone(context, master, 110, 0.35, 'sawtooth', 0.35, now, 165);
+        tone(context, master, 220, 0.3, 'sawtooth', 0.2, now + 0.12, 330);
+      });
+    },
+    champion() {
+      // A champion falls: a short fanfare, two notes and a fifth.
+      play((now) => {
+        tone(context, master, 523, 0.14, 'triangle', 0.3, now);
+        tone(context, master, 784, 0.2, 'triangle', 0.3, now + 0.12);
+        tone(context, master, 1047, 0.3, 'triangle', 0.28, now + 0.26);
+      });
+    },
+    reroll() {
+      // The cards turn over: a quick shuffle of three short notes.
+      play((now) => {
+        tone(context, master, 880, 0.06, 'triangle', 0.18, now);
+        tone(context, master, 740, 0.06, 'triangle', 0.18, now + 0.07);
+        tone(context, master, 990, 0.1, 'triangle', 0.18, now + 0.14);
+      });
+    },
     win() {
       play((now) => {
         const notes = [523, 659, 784, 1047];

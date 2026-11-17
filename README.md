@@ -35,21 +35,40 @@ flawless season, with no leaks at all, earns a bonus blessing. Kills close
 together build a **combo** (up to ×8 score) and a live **letter grade**
 (S/A/B/C/D), shown in the HUD and big on the victory screen.
 
-Five pests march the path — aphids, moths, beetles, regenerating slugs — and on
-wave 20, the Blight itself, spawning aphids as it crawls. Clear all twenty
-waves to win, then keep going in endless mode. Best scores, furthest waves and
-groves saved are kept in localStorage, no network involved.
+Eight pests march the path — aphids, moths, beetles, regenerating slugs — plus
+three named champions: Gloomcap on wave 5, the Mire Warden on wave 10 and
+Rotmother on wave 15. On wave 20 comes the Blight itself, a three-phase boss
+that sheds an aphid swarm at half health and rages at a quarter. The warden
+is not helpless: the **Sunburst** (Q, 150☀) blasts every pest on the field and
+slows the survivors, and three groves set the stakes before the first wave —
+Seedling (200☀, 12 hearts), Warden (150☀, 10 hearts) and Thornstorm (120☀, 8
+hearts, tougher pests). Drafts can be rerolled for 25☀, and five **feats**
+(Untouched, Full Bloom, Blight Slayer, Hoarder, Swift Season) are scored on
+the victory screen with a next goal to chase. The side panel forecasts the
+three waves after the next one, so the garden can be planned ahead. Clear all
+twenty waves to win, then keep going in endless mode. Best scores, furthest
+waves and groves saved are kept in localStorage, no network involved. A won
+year banks one **seed** per feat earned that run, and the victory screen
+charts the score wave by wave from the run's own ledger.
+
+The grove is the **Moonlit Grove**: a midnight garden under a full moon, where
+every plant is bioluminescent in its own colour — a spiky rose, an ice
+crystal, a sunflower, a berry bush, a whipping vine and a glowcap — fireflies
+drift over the beds, the Heart Tree glows like a second moon, and the Blight
+hangs over the field like a rotting moon.
 
 ## How to play
 
-Click a plant card (or press 1–6), then click a grass cell to plant it. Click
-a planted tower to nourish or sell it. Press Space (or the START WAVE button)
-to call the next wave early for a sunlight bonus. When a draft opens, click a
-season card (or press 1–3) to choose the next five waves.
+Pick a grove on the title screen, then click a plant card (or press 1–6) and a
+grass cell to plant it. Click a planted tower to nourish or sell it. Press
+Space (or the START WAVE button) to call the next wave early for a sunlight
+bonus. When a draft opens, click a season card (or press 1–3) to choose the
+next five waves — or reroll the offer for 25☀. Press Q when the swarm closes
+in to fire the Sunburst.
 
 - **1–6** pick a plant · **click** plant / select · **Space** start wave
-- **1–3** pick a season card (draft) · **F** speed 1×/2× · **P** pause
-- **M** mute · **Esc** cancel / back
+- **Q** Sunburst (150☀) · **1–3** pick a season card (draft) · **R** reroll
+- **F** speed 1×/2× · **P** pause · **M** mute · **Esc** cancel / back
 
 ## Play it
 
@@ -63,9 +82,11 @@ node serve.ts
 - `game/` — the game itself: `index.html` plus ES modules in `src/`
   (`config`, `world`, `plants`, `pests`, `waves`, `seasons`, `draft`,
   `blessings`, `combo`, `records`, `economy`, `input`, `audio`, `render`,
-  `shots`, `main`). No library, no assets.
+  `shots`, `main`, plus `difficulty` for the three groves and `feats` for
+  the five victory feats). No library, no assets.
 - `screenshots/` — four real renders of the game's own code, staged by
-  `game/src/shots.js` from `shots.json` (the cover is the wave-20 boss fight).
+  `game/src/shots.js` from `shots.json` (the cover is the wave-20 boss fight,
+  frozen in phase 2 with the Sunburst ready).
 - `main.ts` — the entry program: copies `game/` and `screenshots/` to
   `/output` and writes `dossier.json` with the vendored make.fun library.
 - `vendor/makefun-game.ts` — the kit's copy, unchanged.

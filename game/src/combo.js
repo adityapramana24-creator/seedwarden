@@ -39,6 +39,6 @@ export function gradeFor({ hearts, maxHearts, leaked, longestCombo, wave }) {
   return {
     letter,
     points,
-    line: `${hearts}/${maxHearts} hearts \u00B7 ${leaked} leaked \u00B7 longest combo \u00D7${longestCombo}`,
+    line: `${hearts}/${maxHearts} hearts \u00B7 ${leaked} leaked \u00B7 longest streak ${longestCombo} kills`,
   };
 }

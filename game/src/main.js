@@ -9,11 +9,11 @@
 import { BOARD, STEP } from './config.js';
 import { createRandom } from './random.js';
 import {
-  EVENT_BLESSING, EVENT_DRAFT, EVENT_GROW, EVENT_HARVEST, EVENT_KILL, EVENT_LEAK,
-  EVENT_NOURISH, EVENT_OVER, EVENT_PLANT, EVENT_SELL, EVENT_SHOOT, EVENT_WAVE_CLEAR,
-  EVENT_WAVE_START, EVENT_WIN, createWorld,
+  EVENT_BLESSING, EVENT_BOSS_PHASE, EVENT_CHAMPION, EVENT_DENIED, EVENT_DRAFT, EVENT_GROW,
+  EVENT_HARVEST, EVENT_KILL, EVENT_LEAK, EVENT_NOURISH, EVENT_OVER, EVENT_PLANT, EVENT_REROLL,
+  EVENT_SELL, EVENT_SHOOT, EVENT_SUNBURST, EVENT_WAVE_CLEAR, EVENT_WAVE_START, EVENT_WIN, createWorld,
 } from './world.js';
-import { KEY_CONFIRM, KEY_ESCAPE, KEY_MUTE, KEY_PAUSE, KEY_SPEED, createInput } from './input.js';
+import { KEY_CONFIRM, KEY_ESCAPE, KEY_MUTE, KEY_PAUSE, KEY_REROLL, KEY_SPEED, KEY_SUNBURST, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import {
   LAYOUT, SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_HOWTO, SCREEN_PAUSED, SCREEN_PLAY,
@@ -21,6 +21,9 @@ import {
 } from './render.js';
 import { readRecords, recordGame } from './records.js';
 import { stageShot } from './shots.js';
+import { blightPhaseRules } from './pests.js';
+import { DEFAULT_DIFFICULTY, DIFFICULTIES } from './difficulty.js';
+import { featsFor } from './feats.js';
 
 /** The longest frame the loop catches up on; a longer stall is dropped, not replayed. */
 const MAX_FRAME = 0.25;
@@ -40,6 +43,7 @@ const renderer = createRenderer(canvas);
 function runShot(name) {
   const scene = stageShot(name, world);
   // What the staging actually produced, for the screenshot harness to check.
+  const blight = world.state.pests.find((pest) => pest.type === 'blight') ?? null;
   window.__shot = {
     name,
     screen: scene.screen,
@@ -52,6 +56,16 @@ function runShot(name) {
     longestCombo: world.state.combo.longest,
     won: world.state.won,
     over: world.state.over,
+    difficulty: world.state.difficulty.id,
+    championsFelled: world.state.championsFelled,
+    championsSlain: [...world.state.championsSlain],
+    feats: featsFor(world.state),
+    blightPhase: blight ? blight.phase : 0,
+    blightX: blight ? Math.round(blight.x) : -1,
+    sunburstReady: world.sunburstStatus().ready,
+    floats: world.state.floats.length,
+    tracers: world.state.tracers.length,
+    waveScores: [...world.state.waveScores],
   };
   const ui = {
     hover: { x: -1, y: -1, inside: false },
@@ -60,7 +74,11 @@ function runShot(name) {
     speed: 1,
     muted: false,
     banner: null,
+    difficulty: world.state.difficulty.id,
+    seed,
+    sunburst: world.sunburstStatus(),
     preview: world.preview(),
+    forecast: world.forecast(),
     pestsLeft: world.pestsLeft(),
     pestsTotal: world.pestsTotal(),
     season: world.season(),
@@ -92,14 +110,22 @@ function runGame() {
     selectedPlant: null,
     speed: 1,
     banner: null,
+    difficulty: DEFAULT_DIFFICULTY,
+    seed,
     get muted() {
       return audio.muted();
+    },
+    get sunburst() {
+      return world.sunburstStatus();
     },
     get hover() {
       return input.hover();
     },
     get preview() {
       return world.preview();
+    },
+    get forecast() {
+      return world.forecast();
     },
     get pestsLeft() {
       return world.pestsLeft();
@@ -131,7 +157,7 @@ function runGame() {
   }
 
   function startGame() {
-    world.reset();
+    world.reset(ui.difficulty);
     ui.selectedCard = -1;
     ui.selectedPlant = null;
     ui.banner = null;
@@ -142,7 +168,7 @@ function runGame() {
 
   function endGame(victory) {
     screen = victory ? SCREEN_VICTORY : SCREEN_DEFEAT;
-    records = recordGame({ score: world.state.score, wave: world.state.wave, won: victory });
+    records = recordGame({ score: world.state.score, wave: world.state.wave, won: victory, feats: featsFor(world.state) });
     announce(victory
       ? `Victory! The grove holds. Score ${world.state.score}.`
       : `Defeat on wave ${world.state.wave}. Score ${world.state.score}.`);
@@ -186,6 +212,24 @@ function runGame() {
       announce(`Wave ${world.state.wave}. ${season.name}.`);
     }
     if (events & EVENT_WAVE_CLEAR) audio.waveClear();
+    if (events & EVENT_SUNBURST) {
+      audio.sunburst();
+      showBanner('SUNBURST!', 'Noon light falls on every pest.', 1.6);
+    }
+    if (events & EVENT_BOSS_PHASE) {
+      audio.bossPhase();
+      const blight = world.state.pests.find((pest) => pest.type === 'blight');
+      const phase = blight ? blight.phase : 2;
+      showBanner(`THE BLIGHT — PHASE ${phase}`, blightPhaseRules(phase).name, 2.4);
+      announce(`The Blight turns: phase ${phase}, ${blightPhaseRules(phase).name}.`);
+    }
+    if (events & EVENT_CHAMPION) {
+      audio.champion();
+      const name = world.state.championsSlain[world.state.championsSlain.length - 1] ?? 'A champion';
+      showBanner('CHAMPION FELLED', `${name} — ${world.state.championsFelled} of 3.`, 2.4);
+      announce(`${name} has fallen.`);
+    }
+    if (events & EVENT_REROLL) audio.reroll();
     if (events & EVENT_BLESSING) {
       audio.blessing();
       const blessing = world.state.lastBlessing;
@@ -250,6 +294,12 @@ function runGame() {
       else audio.denied();
       return;
     }
+    if (inside(LAYOUT.sunburstButton, x, y)) {
+      const events = world.sunburst();
+      if (events & EVENT_SUNBURST) playEvents(events);
+      else audio.denied();
+      return;
+    }
     if (inside(LAYOUT.speedButton, x, y)) {
       ui.speed = ui.speed === 1 ? 2 : 1;
       audio.click();
@@ -294,6 +344,15 @@ function runGame() {
       } else if (inside(LAYOUT.titleHow, x, y)) {
         audio.click();
         screen = SCREEN_HOWTO;
+      } else {
+        for (let index = 0; index < LAYOUT.titleDifficulties.length; index += 1) {
+          if (inside(LAYOUT.titleDifficulties[index], x, y)) {
+            ui.difficulty = DIFFICULTIES[index].id;
+            audio.click();
+            announce(`${DIFFICULTIES[index].name} grove selected.`);
+            return;
+          }
+        }
       }
       return;
     }
@@ -314,6 +373,11 @@ function runGame() {
           if (pickDraftCard(index)) audio.click();
           return;
         }
+      }
+      if (inside(LAYOUT.draftReroll, x, y)) {
+        const events = world.rerollDraft();
+        if (events & EVENT_REROLL) audio.reroll();
+        else audio.denied();
       }
       return;
     }
@@ -355,7 +419,17 @@ function runGame() {
   function handleKeys() {
     const keys = input.takeKeys();
     const cardKey = input.takeCardKey();
-    if (keys & (KEY_CONFIRM | KEY_PAUSE | KEY_SPEED | KEY_MUTE | KEY_ESCAPE)) audio.unlock();
+    if (keys & (KEY_CONFIRM | KEY_PAUSE | KEY_SPEED | KEY_MUTE | KEY_ESCAPE | KEY_SUNBURST | KEY_REROLL)) audio.unlock();
+    if (keys & KEY_SUNBURST && screen === SCREEN_PLAY) {
+      const events = world.sunburst();
+      if (events & EVENT_SUNBURST) playEvents(events);
+      else if (events & EVENT_DENIED) audio.denied();
+    }
+    if (keys & KEY_REROLL && screen === SCREEN_DRAFT) {
+      const events = world.rerollDraft();
+      if (events & EVENT_REROLL) audio.reroll();
+      else audio.denied();
+    }
     if (cardKey >= 0 && screen === SCREEN_PLAY) {
       ui.selectedCard = ui.selectedCard === cardKey ? -1 : cardKey;
       ui.selectedPlant = null;
@@ -445,7 +519,7 @@ function runGame() {
     world,
     screen: () => screen,
     records: () => records,
-    ui: () => ({ selectedCard: ui.selectedCard, speed: ui.speed }),
+    ui: () => ({ selectedCard: ui.selectedCard, speed: ui.speed, difficulty: ui.difficulty }),
   };
 
   world.demoGarden();

@@ -56,7 +56,14 @@ createServer((request, response) => {
     'content-length': size,
     'cache-control': 'no-store',
   });
-  createReadStream(file).pipe(response);
+  // A navigating browser can hang up mid-stream; an unhandled socket error
+  // would kill the server, so both ends of the pipe swallow their errors.
+  const stream = createReadStream(file);
+  stream.on('error', () => { try { response.destroy(); } catch { /* already gone */ } });
+  response.on('error', () => stream.destroy());
+  stream.pipe(response);
+}).on('error', (err) => {
+  console.error(`serve error: ${err.message}`);
 }).listen(port, '127.0.0.1', () => {
   console.log(`game/ is on http://localhost:${port}`);
 });

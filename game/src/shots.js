@@ -13,11 +13,12 @@
 
 import { STEP } from './config.js';
 import { EVENT_OVER, EVENT_PLANT, EVENT_WIN } from './world.js';
+import { featsFor } from './feats.js';
 import { readRecords } from './records.js';
 import { SCREEN_DEFEAT, SCREEN_DRAFT, SCREEN_PLAY, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
 
 /** A fresh profile's records: nothing stored yet, no new best claimed. */
-const FRESH_RECORDS = { best: 0, furthest: 0, saved: 0, newBest: false };
+const FRESH_RECORDS = { best: 0, furthest: 0, saved: 0, feats: [], seeds: 0, seedsBanked: 0, newBest: false };
 
 /** The autopilot's planting plan, in order: the best cells first, near the path. */
 const PLAN = [
@@ -87,27 +88,41 @@ function stageStart(world) {
   return { screen: SCREEN_TITLE, records: readRecords() };
 }
 
+/**
+ * The play shot's plan: the first twenty-four towers of the full plan. A full
+ * garden kills the Blight before it reaches mid-field; a smaller one lets the
+ * boss walk further while still holding the grove to wave 20 — and twenty-eight
+ * keeps the garden looking full.
+ */
+const PLAY_PLAN = PLAN.slice(0, 28);
+
 function stagePlay(world) {
   world.reset();
-  // Wave 20, the boss fight: the Blight leads the wave, so once it is on the
-  // field with company, wait a few seconds for the swarm to spread and the
-  // combo to build before freezing the frame.
-  let waveTimer = -1;
+  // Wave 20, the boss fight, frozen at the moment the cover needs: the Blight
+  // mid-field in phase 2, the Sunburst ready, a damage number in the air, a
+  // combo building, and company on the field. If the boss dies or the grove
+  // falls first, the frame is whatever the run reached — the harness fails
+  // loudly on the checks, so a phase-1 cover can never slip through.
   autoplay(
     world,
     (state) => {
       if (state.wave >= 20 && (state.waveState === 'spawning' || state.waveState === 'fighting')) {
-        const blight = state.pests.some((pest) => pest.type === 'blight');
-        if (blight && state.pests.length >= 4) {
-          if (waveTimer < 0) waveTimer = 6;
-          waveTimer -= STEP;
-          return waveTimer <= 0;
-        }
+        const blight = state.pests.find((pest) => pest.type === 'blight');
+        if (
+          blight
+          && blight.phase === 2
+          && blight.x >= 280
+          && state.pests.length >= 4
+          && state.floats.length > 0
+          && state.tracers.length >= 5
+          && state.combo.count >= 3
+          && world.sunburstStatus().ready
+        ) return true;
       }
       return state.over || state.won;
     },
     2400,
-    PLAN,
+    PLAY_PLAN,
   );
   return { screen: SCREEN_PLAY, records: FRESH_RECORDS };
 }
@@ -123,7 +138,9 @@ function stageDraft(world) {
 function stageVictory(world) {
   world.reset();
   autoplay(world, (state, events) => Boolean(events & EVENT_WIN) || state.over, 2400, PLAN);
-  return { screen: SCREEN_VICTORY, records: { best: 0, furthest: 0, saved: 0, newBest: true } };
+  // A fresh profile's victory: the run's own feats are the seeds it banks.
+  const banked = featsFor(world.state).length;
+  return { screen: SCREEN_VICTORY, records: { best: 0, furthest: 0, saved: 0, feats: [], seeds: banked, seedsBanked: banked, newBest: true } };
 }
 
 function stageDefeat(world) {
